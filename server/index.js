@@ -2,6 +2,7 @@
 /*
  * DataBridge 服务器核心
  * HTTP API + WebSocket 实时通道 + mDNS 广播（供 Android NSD 自动发现）
+ * 安全模型：128 位随机配对码 + 失败限速 + 401 延迟应答（防暴力枚举）
  * 既可独立运行（node server/index.js），也被 Electron 主进程 require
  */
 const express = require('express');
@@ -38,7 +39,7 @@ function lanIPs() {
       if (it.family === 'IPv4' && !it.internal) out.push(it.address);
     }
   }
-  const isPrivate = (ip) => /^(192\.168\.|10\.|172\.(1[6-9]|2\d|3[01])\.)/.test(ip);
+  const isPrivate = (ip) => /^(192\.168\.|10\.|172\.(1\d|2\d|3[01])\.)/.test(ip);
   out.sort((a, b) => (isPrivate(b) ? 1 : 0) - (isPrivate(a) ? 1 : 0));
   return out;
 }
@@ -52,6 +53,21 @@ function sanitizeName(name, max) {
 function contentDisposition(name) {
   const fallback = name.replace(/[^\x20-\x7e]/g, '_').replace(/["\\]/g, '_');
   return 'attachment; filename="' + fallback + '"; filename*=UTF-8\'\'' + encodeURIComponent(name);
+}
+
+/* 失败限速：同一 IP 10 分钟内配对失败超过 8 次 → 拉黑到窗口结束 */
+const authFails = new Map(); // ip -> [timestamps]
+const FAIL_WINDOW = 10 * 60 * 1000, FAIL_MAX = 8;
+function isBlocked(ip) {
+  const arr = authFails.get(ip) || [];
+  const recent = arr.filter(t => Date.now() - t < FAIL_WINDOW);
+  authFails.set(ip, recent);
+  return recent.length >= FAIL_MAX;
+}
+function recordFail(ip) {
+  const arr = authFails.get(ip) || [];
+  arr.push(Date.now());
+  authFails.set(ip, arr);
 }
 
 function startServer(opts) {
@@ -78,8 +94,14 @@ function startServer(opts) {
   // token 校验（仅 API；静态页面放行，页面自身不含数据）
   app.use((req, res, next) => {
     if (req.path.startsWith('/api/')) {
+      const ip = req.socket.remoteAddress || '?';
       const t = req.query.t || req.get('x-token') || '';
-      if (t !== cfg.token) return res.status(401).json({ error: 'token 无效，请重新配对' });
+      if (t !== cfg.token) {
+        if (isBlocked(ip)) return res.status(429).json({ error: '尝试过于频繁，请稍后再试' });
+        recordFail(ip);
+        // 延迟应答，拖慢暴力枚举
+        return setTimeout(() => res.status(401).json({ error: '配对码无效' }), 600);
+      }
     }
     next();
   });
@@ -99,7 +121,7 @@ function startServer(opts) {
   // ---------- API ----------
   app.get('/api/info', (req, res) => {
     res.json({
-      app: 'DataBridge', version: '0.1.0',
+      app: 'DataBridge', version: '0.2.0',
       hostname: os.hostname(), port,
       ips: lanIPs(), devices: deviceList(),
     });
@@ -107,7 +129,7 @@ function startServer(opts) {
 
   app.get('/api/qr', async (req, res) => {
     const ips = lanIPs();
-    const url = 'http://' + (ips[0] || ('127.0.0.1:' + port)) .replace(/:\d+$/, '') + ':' + port + '/?t=' + cfg.token;
+    const url = 'http://' + (ips[0] || '127.0.0.1') + ':' + port + '/?t=' + cfg.token;
     const urls = ips.map(ip => 'http://' + ip + ':' + port + '/?t=' + cfg.token);
     try {
       const dataUrl = await QRCode.toDataURL(url, { width: 420, margin: 1 });
@@ -164,8 +186,9 @@ function startServer(opts) {
     if (!item) return res.status(404).json({ error: '不存在' });
     const p = path.join(recvDir, item.stored);
     if (!fs.existsSync(p)) return res.status(404).json({ error: '文件已丢失' });
+    // 浏览器直接打开（预览）时不强制下载：预览用 ?preview=1，否则带下载头
+    if (!req.query.preview) res.setHeader('Content-Disposition', contentDisposition(item.name));
     res.setHeader('Content-Type', item.mime);
-    res.setHeader('Content-Disposition', contentDisposition(item.name));
     res.setHeader('Cache-Control', 'private, max-age=86400');
     fs.createReadStream(p).pipe(res);
   });
@@ -228,11 +251,11 @@ function startServer(opts) {
     for (const ws of wss.clients) { if (ws.readyState === 1) { try { ws.send(s); } catch (e) {} } }
   }
 
-  // ---------- mDNS（Android NSD 发现用）----------
+  // ---------- mDNS（Android NSD 自动发现用）----------
   let bonjour = null, svc = null;
   try {
     bonjour = new Bonjour();
-    svc = bonjour.publish({ name: 'DataBridge-' + os.hostname(), type: 'http', port, txt: { app: 'databridge', token: cfg.token, v: '1' } });
+    svc = bonjour.publish({ name: 'DataBridge-' + os.hostname(), type: 'http', port, txt: { app: 'databridge', token: cfg.token, v: '2' } });
   } catch (e) { console.warn('[mDNS] 发布失败(不影响手动连接):', e.message); }
 
   return new Promise((resolve) => {
@@ -263,10 +286,9 @@ if (require.main === module) {
   (async () => {
     const s = await startServer();
     console.log('========================================');
-    console.log('  DataBridge 三端互通 · 服务器已启动');
-    console.log('  本机访问: http://localhost:' + s.port + '/?t=' + s.token);
-    for (const u of s.urls) console.log('  局域网:   ' + u);
-    console.log('  接收目录: ' + path.join(__dirname, 'data', 'received'));
+    console.log('  DataBridge v0.2 server ready');
+    console.log('  local: http://localhost:' + s.port + '/?t=' + s.token);
+    for (const u of s.urls) console.log('  lan:   ' + u);
     console.log('========================================');
   })();
 }

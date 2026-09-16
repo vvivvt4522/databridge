@@ -10,6 +10,9 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
+import android.graphics.Bitmap;
+import android.net.ConnectivityManager;
+import android.net.Network;
 import android.net.Uri;
 import android.net.nsd.NsdManager;
 import android.net.nsd.NsdServiceInfo;
@@ -40,8 +43,11 @@ import android.widget.Toast;
 
 import java.io.File;
 import java.io.FileOutputStream;
+import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.HttpURLConnection;
 import java.net.InetAddress;
+import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -50,9 +56,10 @@ public class MainActivity extends Activity {
 
     private static final int REQ_FILE_CHOOSER = 1001;
     private static final int REQ_STORAGE_PERM = 1002;
+    private static final long AUTO_DISCOVER_TIMEOUT = 7000;
 
     private WebView webView;
-    private LinearLayout serverList;      // 发现页动态容器
+    private LinearLayout serverList;
     private TextView statusText;
     private FrameLayout settingsPanel;
     private ValueCallback<Uri[]> filePathCallback;
@@ -61,6 +68,8 @@ public class MainActivity extends Activity {
     private final Map<String, String> found = new LinkedHashMap<>();
     private final Handler main = new Handler(Looper.getMainLooper());
     private String serverUrl = "";
+    private String lastLoadedUrl = "";
+    private volatile boolean autoConnecting = false;
 
     @SuppressLint("SetJavaScriptEnabled")
     @Override
@@ -92,12 +101,8 @@ public class MainActivity extends Activity {
             public boolean onShowFileChooser(WebView wv, ValueCallback<Uri[]> cb, FileChooserParams params) {
                 if (filePathCallback != null) filePathCallback.onReceiveValue(null);
                 filePathCallback = cb;
-                Intent i = new Intent(Intent.ACTION_GET_CONTENT);
-                i.addCategory(Intent.CATEGORY_OPENABLE);
-                i.setType("*/*");
-                i.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
                 try {
-                    startActivityForResult(Intent.createChooser(i, "选择要发送的文件"), REQ_FILE_CHOOSER);
+                    startActivityForResult(buildPickIntent(params), REQ_FILE_CHOOSER);
                 } catch (Exception e) {
                     filePathCallback = null;
                     return false;
@@ -115,12 +120,73 @@ public class MainActivity extends Activity {
                 checkSelfPermission(android.Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(new String[]{android.Manifest.permission.WRITE_EXTERNAL_STORAGE}, REQ_STORAGE_PERM);
         }
-
-        if (serverUrl.isEmpty()) showServerSelect();
-        else webView.loadUrl(serverUrl);
+        registerNetworkCallback();
+        autoConnect();
     }
 
-    /* ---------------- UI ---------------- */
+    /* ================= 自动连接：ping 已保存地址 → 静默发现 → 手动兜底 ================= */
+    private void autoConnect() {
+        if (autoConnecting) return;
+        autoConnecting = true;
+        new Thread(() -> {
+            String saved = prefs.getString("server_url", "");
+            boolean savedOk = !saved.isEmpty() && pingServer(saved);
+            if (savedOk && saved.equals(lastLoadedUrl)) {
+                autoConnecting = false;          // 页面本来就活着，不用动
+                return;
+            }
+            if (savedOk) {
+                main.post(() -> { autoConnecting = false; loadApp(saved); });
+                return;
+            }
+            // 已保存地址失效 → 静默重新发现
+            main.post(() -> {
+                statusText.setText("正在自动搜索 PC…");
+                serverList.removeAllViews();
+                settingsPanel.setVisibility(View.GONE);
+                webView.setVisibility(View.VISIBLE);
+                startDiscovery(true);
+                main.postDelayed(() -> {
+                    if (autoConnecting) {
+                        autoConnecting = false;
+                        stopDiscoverySafe();
+                        showServerSelect();
+                    }
+                }, AUTO_DISCOVER_TIMEOUT);
+            });
+        }).start();
+    }
+
+    private boolean pingServer(String url) {
+        try {
+            HttpURLConnection c = (HttpURLConnection) new URL(url).openConnection();
+            c.setConnectTimeout(1500);
+            c.setReadTimeout(2000);
+            c.setRequestMethod("GET");
+            int code = c.getResponseCode();
+            try { c.getInputStream().close(); } catch (Exception ignored) {}
+            return code == 200;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    private void registerNetworkCallback() {
+        try {
+            ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+            cm.registerDefaultNetworkCallback(new ConnectivityManager.NetworkCallback() {
+                @Override public void onAvailable(Network network) {
+                    main.postDelayed(() -> {
+                        String saved = prefs.getString("server_url", "");
+                        boolean alive = !saved.isEmpty() && pingServer(saved);
+                        if (!alive) autoConnect();
+                    }, 2000);
+                }
+            });
+        } catch (Exception ignored) {}
+    }
+
+    /* ================= UI ================= */
     private int dp(int v) { return Math.round(v * getResources().getDisplayMetrics().density); }
 
     private void buildUi() {
@@ -155,7 +221,7 @@ public class MainActivity extends Activity {
         box.addView(manual);
 
         TextView tip = new TextView(this);
-        tip.setText("提示：确保手机与电脑在同一 WiFi，且 PC 端已启动并放行防火墙。");
+        tip.setText("提示：手机与电脑需在同一 WiFi，且 PC 端已启动并放行防火墙。");
         tip.setTextSize(12); tip.setTextColor(0xFF7A839E);
         tip.setPadding(0, dp(10), 0, 0);
         box.addView(tip);
@@ -174,26 +240,21 @@ public class MainActivity extends Activity {
         glp.setMargins(0, dp(8), dp(8), 0);
         gear.setOnClickListener(v -> new AlertDialog.Builder(this)
                 .setMessage("要重新选择服务器吗？")
-                .setPositiveButton("是", (d, w) -> showServerSelect())
+                .setPositiveButton("是", (d, w) -> { autoConnecting = false; showServerSelect(); })
                 .setNegativeButton("取消", null).show());
         root.addView(gear, glp);
 
         setContentView(root);
     }
 
-    /* ---------------- 服务器选择（NSD 自动发现 + 手动） ---------------- */
+    /* ================= 服务器选择（发现 + 手动） ================= */
     private void showServerSelect() {
         found.clear();
         serverList.removeAllViews();
         statusText.setText("正在搜索同一 WiFi 下的 PC…");
         settingsPanel.setVisibility(View.VISIBLE);
         webView.setVisibility(View.GONE);
-        startDiscovery();
-        main.postDelayed(() -> {
-            if (settingsPanel.getVisibility() == View.VISIBLE && found.isEmpty()) {
-                statusText.setText("没搜到 PC。请确认 PC 端已启动、双方在同一 WiFi；也可手动输入。");
-            }
-        }, 8000);
+        startDiscovery(false);
     }
 
     private void addServerButton(String name, String url) {
@@ -205,21 +266,20 @@ public class MainActivity extends Activity {
         serverList.addView(b);
     }
 
-    private void startDiscovery() {
+    private void startDiscovery(boolean silent) {
         try {
-            nsd = (NsdManager) getSystemService(Context.NSD_SERVICE);
+            if (nsd == null) nsd = (NsdManager) getSystemService(Context.NSD_SERVICE);
             nsd.discoverServices("_http._tcp.", NsdManager.PROTOCOL_DNS_SD, new NsdManager.DiscoveryListener() {
                 @Override public void onDiscoveryStarted(String t) {}
                 @Override public void onDiscoveryStopped(String t) {}
                 @Override public void onStartDiscoveryFailed(String t, int e) {
-                    statusText.setText("搜索失败，请手动输入地址");
+                    if (!silent) statusText.setText("搜索失败，请手动输入地址");
                 }
                 @Override public void onStopDiscoveryFailed(String t, int e) {}
                 @Override public void onServiceLost(NsdServiceInfo i) {}
                 @Override public void onServiceFound(NsdServiceInfo info) {
                     String name = info.getServiceName();
                     if (name == null || !name.startsWith("DataBridge")) return;
-                    runOnUiThread(() -> statusText.setText("发现 PC，正在连接…"));
                     try { nsd.resolveService(info, new NsdManager.ResolveListener() {
                         @Override public void onResolveFailed(NsdServiceInfo i, int e) {}
                         @Override public void onServiceResolved(NsdServiceInfo i) {
@@ -233,14 +293,33 @@ public class MainActivity extends Activity {
                             if (host == null || token.isEmpty()) return;
                             final String url = "http://" + host.getHostAddress() + ":" + port + "/?t=" + token;
                             final String label = name.replace("DataBridge-", "PC：");
-                            main.post(() -> { found.put(label, url); addServerButton(label, url); });
+                            main.post(() -> {
+                                if (autoConnecting) {          // 静默模式：找到第一台直接连
+                                    autoConnecting = false;
+                                    loadApp(url);
+                                } else {
+                                    found.put(label, url);
+                                    addServerButton(label, url);
+                                }
+                            });
                         }
                     }); } catch (Exception ignored) {}
                 }
             });
         } catch (Exception e) {
-            statusText.setText("此设备不支持自动发现，请手动输入地址");
+            if (!silent) statusText.setText("此设备不支持自动发现，请手动输入地址");
         }
+    }
+
+    private void stopDiscoverySafe() {
+        try { if (nsd != null) nsd.stopServiceDiscovery(new NsdManager.DiscoveryListener() {
+            @Override public void onDiscoveryStarted(String t) {}
+            @Override public void onStartDiscoveryFailed(String t, int e) {}
+            @Override public void onStopDiscoveryFailed(String t, int e) {}
+            @Override public void onDiscoveryStopped(String t) {}
+            @Override public void onServiceFound(NsdServiceInfo i) {}
+            @Override public void onServiceLost(NsdServiceInfo i) {}
+        }); } catch (Exception ignored) {}
     }
 
     private void manualInput() {
@@ -262,21 +341,50 @@ public class MainActivity extends Activity {
 
     private void loadApp(String url) {
         serverUrl = url;
+        lastLoadedUrl = url;
         prefs.edit().putString("server_url", url).apply();
         settingsPanel.setVisibility(View.GONE);
         webView.setVisibility(View.VISIBLE);
-        try { if (nsd != null) nsd.stopServiceDiscovery(new NsdManager.DiscoveryListener() {
-            @Override public void onDiscoveryStarted(String t) {}
-            @Override public void onStartDiscoveryFailed(String t, int e) {}
-            @Override public void onStopDiscoveryFailed(String t, int e) {}
-            @Override public void onDiscoveryStopped(String t) {}
-            @Override public void onServiceFound(NsdServiceInfo i) {}
-            @Override public void onServiceLost(NsdServiceInfo i) {}
-        }); } catch (Exception ignored) {}
+        stopDiscoverySafe();
         webView.loadUrl(url);
     }
 
-    /* ---------------- 原生桥 ---------------- */
+    /* ================= 文件选择：照片走相册选择器，其他走文件选择器 ================= */
+    private Intent buildPickIntent(WebChromeClient.FileChooserParams params) {
+        String[] types = params.getAcceptTypes();
+        boolean mediaOnly = types != null && types.length > 0;
+        if (types != null) {
+            for (String t : types) {
+                if (t == null || t.isEmpty()) continue;
+                if (!(t.startsWith("image/") || t.startsWith("video/"))) { mediaOnly = false; break; }
+            }
+        }
+
+        // Android 13+ 系统照片选择器：网格点选、原生多选
+        if (mediaOnly && Build.VERSION.SDK_INT >= 33) {
+            try {
+                Intent i = new Intent(MediaStore.ACTION_PICK_IMAGES);
+                i.setType("*/*");
+                int max = Math.min(50, MediaStore.getPickImagesMaxLimit());
+                i.putExtra(MediaStore.EXTRA_PICK_IMAGES_MAX, max);
+                return i;
+            } catch (Exception ignored) {}
+        }
+
+        // 老版本的照片/视频：限定媒体类型的文件选择器（长按可多选）
+        Intent i = new Intent(Intent.ACTION_GET_CONTENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        if (mediaOnly) {
+            i.setType("image/*");
+            i.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"image/*", "video/*"});
+        } else {
+            i.setType("*/*");
+        }
+        i.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+        return Intent.createChooser(i, mediaOnly ? "选择照片/视频" : "选择要发送的文件");
+    }
+
+    /* ================= 原生桥 ================= */
     private class Bridge {
         @JavascriptInterface
         public String getClipboard() {
@@ -299,20 +407,85 @@ public class MainActivity extends Activity {
             } catch (Exception e) { return false; }
         }
 
+        /* 流式下载保存：任意大小不占内存（图片→相册，视频→相册，其他→下载目录） */
         @JavascriptInterface
-        public boolean saveFile(String name, String b64, String mime) {
+        public boolean saveFromUrl(String url, String name, String mime) {
+            String safe = sanitize(name);
+            boolean isImage = mime != null && mime.startsWith("image/");
+            boolean isVideo = mime != null && mime.startsWith("video/");
+            Uri mediaUri = null;
+            File legacy = null;
+            OutputStream os = null;
+            HttpURLConnection conn = null;
             try {
-                byte[] data = Base64.decode(b64, Base64.DEFAULT);
-                boolean isImage = mime != null && mime.startsWith("image/");
-                String safe = (name == null || name.isEmpty() ? "file" : name)
-                        .replaceAll("[\\\\/:*?\"<>|]", "_");
-                boolean ok;
                 if (Build.VERSION.SDK_INT >= 29) {
                     ContentValues cv = new ContentValues();
                     cv.put(MediaStore.MediaColumns.DISPLAY_NAME, safe);
                     cv.put(MediaStore.MediaColumns.MIME_TYPE, mime == null ? "application/octet-stream" : mime);
-                    Uri collection = isImage
-                            ? MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+                    Uri collection = isImage ? MediaStore.Images.Media.EXTERNAL_CONTENT_URI
+                            : isVideo ? MediaStore.Video.Media.EXTERNAL_CONTENT_URI
+                            : MediaStore.Downloads.EXTERNAL_CONTENT_URI;
+                    mediaUri = getContentResolver().insert(collection, cv);
+                    if (mediaUri == null) throw new Exception("insert failed");
+                    os = getContentResolver().openOutputStream(mediaUri);
+                } else {
+                    File dir = Environment.getExternalStoragePublicDirectory(
+                            isImage ? Environment.DIRECTORY_PICTURES
+                            : isVideo ? Environment.DIRECTORY_MOVIES
+                            : Environment.DIRECTORY_DOWNLOADS);
+                    if (!dir.exists()) dir.mkdirs();
+                    legacy = new File(dir, System.currentTimeMillis() + "_" + safe);
+                    os = new FileOutputStream(legacy);
+                }
+
+                conn = (HttpURLConnection) new URL(url).openConnection();
+                conn.setConnectTimeout(8000);
+                conn.setReadTimeout(30000);
+                InputStream in = conn.getInputStream();
+                byte[] buf = new byte[65536];
+                int n;
+                while ((n = in.read(buf)) > 0) os.write(buf, 0, n);
+                os.flush();
+                in.close();
+                if (legacy != null && Build.VERSION.SDK_INT < 29) {
+                    try {
+                        new android.media.MediaScannerConnection.OnScanCompletedListener() {
+                            @Override public void onScanCompleted(String p, Uri u) {}
+                        };
+                        android.media.MediaScannerConnection.scanFile(MainActivity.this,
+                                new String[]{legacy.getAbsolutePath()}, null, null);
+                    } catch (Exception ignored) {}
+                }
+                main.post(() -> Toast.makeText(MainActivity.this,
+                        "已保存：" + (isImage || isVideo ? "相册" : "下载目录") + " " + safe,
+                        Toast.LENGTH_SHORT).show());
+                return true;
+            } catch (Exception e) {
+                if (mediaUri != null) {
+                    try { getContentResolver().delete(mediaUri, null, null); } catch (Exception ignored) {}
+                }
+                if (legacy != null) legacy.delete();
+                main.post(() -> Toast.makeText(MainActivity.this,
+                        "保存失败：" + e.getMessage(), Toast.LENGTH_SHORT).show());
+                return false;
+            } finally {
+                try { if (os != null) os.close(); } catch (Exception ignored) {}
+                try { if (conn != null) conn.disconnect(); } catch (Exception ignored) {}
+            }
+        }
+
+        /* 兼容保留：base64 保存小文件 */
+        @JavascriptInterface
+        public boolean saveFile(String name, String b64, String mime) {
+            try {
+                byte[] data = Base64.decode(b64, Base64.DEFAULT);
+                String safe = sanitize(name);
+                boolean isImage = mime != null && mime.startsWith("image/");
+                if (Build.VERSION.SDK_INT >= 29) {
+                    ContentValues cv = new ContentValues();
+                    cv.put(MediaStore.MediaColumns.DISPLAY_NAME, safe);
+                    cv.put(MediaStore.MediaColumns.MIME_TYPE, mime == null ? "application/octet-stream" : mime);
+                    Uri collection = isImage ? MediaStore.Images.Media.EXTERNAL_CONTENT_URI
                             : MediaStore.Downloads.EXTERNAL_CONTENT_URI;
                     Uri uri = getContentResolver().insert(collection, cv);
                     if (uri == null) return false;
@@ -320,28 +493,23 @@ public class MainActivity extends Activity {
                         if (os == null) return false;
                         os.write(data);
                     }
-                    ok = true;
-                } else {
-                    File dir = Environment.getExternalStoragePublicDirectory(
-                            isImage ? Environment.DIRECTORY_PICTURES : Environment.DIRECTORY_DOWNLOADS);
-                    if (!dir.exists()) dir.mkdirs();
-                    File f = new File(dir, safe);
-                    try (FileOutputStream fos = new FileOutputStream(f)) { fos.write(data); }
-                    ok = true;
+                    return true;
                 }
-                final boolean done = ok;
-                main.post(() -> Toast.makeText(MainActivity.this,
-                        done ? "已保存：" + (isImage ? "相册" : "下载目录") : "保存失败",
-                        Toast.LENGTH_SHORT).show());
-                return done;
-            } catch (Exception e) {
-                main.post(() -> Toast.makeText(MainActivity.this, "保存失败：" + e.getMessage(), Toast.LENGTH_SHORT).show());
-                return false;
-            }
+                File dir = Environment.getExternalStoragePublicDirectory(
+                        isImage ? Environment.DIRECTORY_PICTURES : Environment.DIRECTORY_DOWNLOADS);
+                if (!dir.exists()) dir.mkdirs();
+                try (FileOutputStream fos = new FileOutputStream(new File(dir, safe))) { fos.write(data); }
+                return true;
+            } catch (Exception e) { return false; }
         }
     }
 
-    /* ---------------- 文件选择 / 返回键 ---------------- */
+    private String sanitize(String name) {
+        return (name == null || name.isEmpty() ? "file" : name)
+                .replaceAll("[\\\\/:*?\"<>|]", "_");
+    }
+
+    /* ================= 生命周期 ================= */
     @Override
     protected void onActivityResult(int requestCode, int resultCode, Intent data) {
         if (requestCode == REQ_FILE_CHOOSER && filePathCallback != null) {
@@ -366,14 +534,7 @@ public class MainActivity extends Activity {
 
     @Override
     protected void onDestroy() {
-        try { if (nsd != null) nsd.stopServiceDiscovery(new NsdManager.DiscoveryListener() {
-            @Override public void onDiscoveryStarted(String t) {}
-            @Override public void onStartDiscoveryFailed(String t, int e) {}
-            @Override public void onStopDiscoveryFailed(String t, int e) {}
-            @Override public void onDiscoveryStopped(String t) {}
-            @Override public void onServiceFound(NsdServiceInfo i) {}
-            @Override public void onServiceLost(NsdServiceInfo i) {}
-        }); } catch (Exception ignored) {}
+        stopDiscoverySafe();
         super.onDestroy();
     }
 }

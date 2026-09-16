@@ -1,5 +1,5 @@
 'use strict';
-/* 三端互通 - 共享前端逻辑（PC Electron / Android WebView / iOS WKWebView / 浏览器通用） */
+/* 三端互通 - 共享前端逻辑 v0.2（PC Electron / Android WebView / iOS WKWebView / 浏览器通用） */
 
 const $ = (s) => document.querySelector(s);
 const LS = {
@@ -11,6 +11,8 @@ const LS = {
   set name(v) { localStorage.setItem('db_name', v); },
   get kind() { return localStorage.getItem('db_kind') || ''; },
   set kind(v) { localStorage.setItem('db_kind', v); },
+  get autosave() { return localStorage.getItem('db_autosave') !== '0'; },
+  set autosave(v) { localStorage.setItem('db_autosave', v ? '1' : '0'); },
 };
 
 /* ---------- 原生桥（各端壳注入 window.NativeBridge） ---------- */
@@ -18,7 +20,7 @@ const B = window.NativeBridge || null;
 const CAP = {
   getClip: !!(B && B.getClipboard),
   setClip: !!(B && B.setClipboard),
-  save: !!(B && B.saveFile),
+  save: !!(B && (B.saveFile || B.saveFromUrl)),
   reveal: !!(B && B.revealFile),
 };
 const MY_KIND = (B && B.kind) || detectKind();
@@ -51,6 +53,8 @@ function fmtTime(ts) {
   return (d.getMonth() + 1) + '-' + d.getDate() + ' ' + hm;
 }
 function esc(s) { return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+function isImage(f) { return /^image\//.test(f.mime || ''); }
+function isVideo(f) { return /^video\//.test(f.mime || ''); }
 
 function apiUrl(p) { return LS.server.replace(/\/$/, '') + p + (p.includes('?') ? '&' : '?') + 't=' + LS.token; }
 async function api(p, opt) {
@@ -95,7 +99,7 @@ document.querySelectorAll('nav button').forEach(b => {
 });
 
 /* ---------- WebSocket 实时通道 ---------- */
-let ws = null, wsTimer = null, helloDone = false;
+let ws = null, wsTimer = null;
 function connectWS() {
   clearTimeout(wsTimer);
   if (!LS.server) return;
@@ -104,20 +108,20 @@ function connectWS() {
   ws.onopen = () => {
     setConn(true);
     ws.send(JSON.stringify({ type: 'hello', name: myName(), kind: MY_KIND }));
+    loadFiles(); loadTexts();   // 重连后立即刷新，补齐断线期间的内容
   };
   ws.onmessage = (ev) => {
     let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
-    if (m.type === 'welcome') { helloDone = true; }
-    else if (m.type === 'devices') renderDevices(m.list);
-    else if (m.type === 'text') { onIncomingText(m.item); }
-    else if (m.type === 'file') { onIncomingFile(m.item); }
+    if (m.type === 'devices') renderDevices(m.list);
+    else if (m.type === 'text') onIncomingText(m.item);
+    else if (m.type === 'file') onIncomingFile(m.item);
     else if (m.type === 'files-changed') loadFiles();
     else if (m.type === 'texts-changed') loadTexts();
   };
   ws.onclose = () => { setConn(false); retryWS(); };
   ws.onerror = () => { try { ws.close(); } catch (e) {} };
 }
-function retryWS() { helloDone = false; wsTimer = setTimeout(connectWS, 3000); }
+function retryWS() { wsTimer = setTimeout(connectWS, 2500); }
 function setConn(on) {
   const el = $('#connState');
   el.textContent = on ? '● 已连接 ' + serverHost() : '○ 未连接，重试中…';
@@ -136,10 +140,25 @@ function onIncomingText(item) {
 }
 function onIncomingFile(item) {
   loadFiles();
-  if (item.kind !== MY_KIND) toast('收到文件：' + item.name);
+  if (item.kind === MY_KIND) return;
+  if (CAP.save && LS.autosave) {
+    autoSave(item);
+  } else {
+    toast('收到文件：' + item.name + '（点它预览）', 3200);
+  }
 }
 
-/* ---------- 文件 ---------- */
+/* 自动保存：收到文件直接落到相册/下载 */
+async function autoSave(item) {
+  try {
+    await saveItem(item);
+    toast('已自动保存：' + item.name, 2600);
+  } catch (e) {
+    toast('自动保存失败：' + item.name + '，可在列表里手动保存', 3200);
+  }
+}
+
+/* ---------- 文件列表 ---------- */
 async function loadFiles() {
   let list;
   try { list = await api('/api/files'); } catch (e) { return; }
@@ -151,19 +170,32 @@ async function loadFiles() {
 function fileItem(f) {
   const div = document.createElement('div');
   div.className = 'item';
-  const isImg = /^image\//.test(f.mime);
-  const thumb = isImg
-    ? '<img class="thumb" loading="lazy" src="' + apiUrl('/api/file/' + f.id) + '">'
-    : '<div class="fileicon">' + (/^video\//.test(f.mime) ? '🎬' : '📄') + '</div>';
+  const thumb = isImage(f)
+    ? '<img class="thumb" loading="lazy" src="' + apiUrl('/api/file/' + f.id + '&preview=1') + '">'
+    : '<div class="fileicon">' + (isVideo(f) ? '🎬' : '📄') + '</div>';
+  const canPreview = isImage(f) || isVideo(f);
   div.innerHTML = thumb +
-    '<div class="info"><div class="name">' + esc(f.name) + '</div>' +
+    '<div class="info"><div class="name' + (canPreview ? ' clickable' : '') + '">' + esc(f.name) + '</div>' +
     '<div class="meta">' + fmtSize(f.size) + ' · ' + esc(f.from) + ' · ' + fmtTime(f.time) + '</div></div>' +
     '<div class="actions"></div>';
   const act = div.querySelector('.actions');
+
+  if (canPreview) {
+    div.querySelector('.name').onclick = () => openPreview(f);
+    const pv = document.createElement('button');
+    pv.className = 'linkbtn'; pv.textContent = '预览';
+    pv.onclick = () => openPreview(f);
+    act.appendChild(pv);
+  }
   if (CAP.save) {
     const b = document.createElement('button');
     b.className = 'linkbtn'; b.textContent = '保存';
-    b.onclick = () => saveToNative(f, b);
+    b.onclick = async () => {
+      b.textContent = '保存中…';
+      try { await saveItem(f); toast('已保存'); }
+      catch (e) { toast('保存失败：' + e.message); }
+      b.textContent = '保存';
+    };
     act.appendChild(b);
   } else if (CAP.reveal) {
     const b = document.createElement('button');
@@ -182,28 +214,54 @@ function fileItem(f) {
   act.appendChild(del);
   return div;
 }
-async function saveToNative(f, btn) {
-  btn.textContent = '保存中…';
-  try {
-    if (f.size > 300 * 1048576) throw new Error('文件过大，请用浏览器下载');
-    const r = await fetch(apiUrl('/api/file/' + f.id));
-    const blob = await r.blob();
-    const b64 = await new Promise((res, rej) => {
-      const fr = new FileReader();
-      fr.onload = () => res(String(fr.result).split(',')[1]);
-      fr.onerror = rej;
-      fr.readAsDataURL(blob);
-    });
-    const ok = await Promise.resolve(B.saveFile(f.name, b64, f.mime || 'application/octet-stream'));
-    toast(ok === false ? '保存失败' : '已保存（图片在相册，其他在下载目录）');
-  } catch (e) { toast('保存失败：' + e.message); }
-  btn.textContent = '保存';
+
+/* 保存到本机：优先原生流式下载（无大小限制），退回 base64 */
+async function saveItem(f) {
+  if (B && B.saveFromUrl) {
+    const ok = await Promise.resolve(B.saveFromUrl(apiUrl('/api/file/' + f.id), f.name, f.mime || 'application/octet-stream'));
+    if (ok === false) throw new Error('原生保存失败');
+    return;
+  }
+  if (f.size > 100 * 1048576) throw new Error('文件过大，请用浏览器下载');
+  const r = await fetch(apiUrl('/api/file/' + f.id));
+  const blob = await r.blob();
+  const b64 = await new Promise((res, rej) => {
+    const fr = new FileReader();
+    fr.onload = () => res(String(fr.result).split(',')[1]);
+    fr.onerror = rej;
+    fr.readAsDataURL(blob);
+  });
+  const ok = await Promise.resolve(B.saveFile(f.name, b64, f.mime || 'application/octet-stream'));
+  if (ok === false) throw new Error('原生保存失败');
 }
 
-/* 上传 */
-const dz = $('#dropzone'), fi = $('#fileInput');
-dz.onclick = () => fi.click();
-fi.onchange = () => { uploadFiles(fi.files); fi.value = ''; };
+/* ---------- 预览 ---------- */
+function openPreview(f) {
+  const c = $('#previewContent');
+  $('#previewName').textContent = f.name;
+  $('#previewMeta').textContent = fmtSize(f.size) + ' · ' + esc(f.from);
+  if (isImage(f)) {
+    c.innerHTML = '<img src="' + apiUrl('/api/file/' + f.id + '&preview=1') + '">';
+  } else if (isVideo(f)) {
+    c.innerHTML = '<video src="' + apiUrl('/api/file/' + f.id + '&preview=1') + '" controls autoplay playsinline></video>';
+  } else {
+    c.innerHTML = '<div class="noPreview">该类型暂不支持预览<br>可点"保存"到本机查看</div>';
+  }
+  $('#previewModal').classList.remove('hidden');
+}
+function closePreview() {
+  $('#previewContent').innerHTML = '';
+  $('#previewModal').classList.add('hidden');
+}
+document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closePreview(); });
+
+/* ---------- 上传 ---------- */
+const dz = $('#dropzone');
+dz.onclick = () => $('#fileInputMedia').click();
+$('#btnPickMedia').onclick = () => $('#fileInputMedia').click();
+$('#btnPickFile').onclick = () => $('#fileInputFile').click();
+$('#fileInputMedia').onchange = (e) => { uploadFiles(e.target.files); e.target.value = ''; };
+$('#fileInputFile').onchange = (e) => { uploadFiles(e.target.files); e.target.value = ''; };
 ['dragover', 'dragenter'].forEach(ev => dz.addEventListener(ev, e => { e.preventDefault(); dz.classList.add('drag'); }));
 ['dragleave', 'drop'].forEach(ev => dz.addEventListener(ev, e => { e.preventDefault(); dz.classList.remove('drag'); }));
 dz.addEventListener('drop', e => { if (e.dataTransfer.files.length) uploadFiles(e.dataTransfer.files); });
@@ -244,7 +302,6 @@ $('#btnSendClip').onclick = async () => {
     try { text = await Promise.resolve(B.getClipboard()); } catch (e) { text = ''; }
   }
   if (!text) {
-    // 无原生桥或剪贴板为空：聚焦输入框让用户长按粘贴
     $('#clipInput').focus();
     toast(CAP.getClip ? '剪贴板是空的，可在下方输入' : '请长按下方输入框选择"粘贴"');
     return;
@@ -303,9 +360,8 @@ async function copyText(text) {
 }
 
 /* ---------- 设备 ---------- */
-let devicesCache = [];
 function renderDevices(list) {
-  devicesCache = list || [];
+  const devicesCache = list || [];
   const box = $('#deviceList');
   const map = { pc: '🖥️ 电脑', android: '🤖 Android', ios: '📱 iPhone/iPad', web: '🌐 浏览器' };
   const meName = myName();
@@ -340,6 +396,20 @@ $('#myName').onclick = () => {
   if (n && n.trim()) { LS.name = n.trim(); $('#myName').textContent = LS.name; if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'hello', name: LS.name, kind: MY_KIND })); }
 };
 
+/* ---------- 自动保存开关 ---------- */
+function initAutosave() {
+  const row = $('#autosaveRow'), chk = $('#autosaveChk');
+  if (!CAP.save) { row.hidden = true; return; }
+  row.hidden = false;
+  chk.checked = LS.autosave;
+  chk.onchange = () => { LS.autosave = chk.checked; toast(chk.checked ? '已开启自动保存' : '已关闭自动保存'); };
+}
+
+/* 页面重新可见时刷新（手机切后台回来） */
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) { loadFiles(); loadTexts(); }
+});
+
 /* ---------- 启动 ---------- */
 (async function boot() {
   const u = new URL(location.href);
@@ -357,6 +427,7 @@ $('#myName').onclick = () => {
   } catch (e) {
     setConn(false);
   }
+  initAutosave();
   connectWS();
   loadFiles(); loadTexts(); loadQR();
 })();

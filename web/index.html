@@ -22,12 +22,21 @@
     <section id="tab-files" class="tab active">
       <div class="dropzone" id="dropzone">
         <div style="font-size:34px">📤</div>
-        <div>点击选择文件，或拖拽到此处</div>
-        <div style="font-size:12px;margin-top:4px">支持图片 / 视频 / 任意文件 · 单文件最大 2GB</div>
+        <div>拖拽文件到这里，或用下方按钮选择</div>
+        <div style="font-size:12px;margin-top:4px">原图直传 · 不压缩 · 单文件最大 2GB</div>
       </div>
-      <input type="file" id="fileInput" multiple hidden>
+      <div class="row" style="margin-bottom:14px">
+        <button class="btn" id="btnPickMedia" style="flex:1">🖼️ 选照片 / 视频（可多选）</button>
+        <button class="btn plain" id="btnPickFile" style="flex:1">📁 选任意文件</button>
+      </div>
+      <input type="file" id="fileInputMedia" accept="image/*,video/*" multiple hidden>
+      <input type="file" id="fileInputFile" multiple hidden>
+      <label class="autosave" id="autosaveRow" hidden>
+        <input type="checkbox" id="autosaveChk">
+        <span>收到图片/视频时<b>自动保存</b>到相册（APK等文件到下载目录）</span>
+      </label>
       <div class="card">
-        <h3>传输记录（保存在 PC 的 received 目录）</h3>
+        <h3>传输记录（保存在 PC 的 received 目录）· 点名称可预览</h3>
         <div id="fileList"><div class="empty">暂无文件，传一张试试</div></div>
       </div>
     </section>
@@ -62,6 +71,15 @@
         <div style="height:8px"></div>
         <button class="btn ghost small" id="btnChangeServer">更换服务器 / 重新配对</button>
       </div>
+      <div class="card">
+        <h3>安全说明</h3>
+        <div style="font-size:13px;color:var(--sub);line-height:1.7">
+          ✓ 配对码为 128 位随机数，配对后仅存本机，不再经过网络明文传输地址栏<br>
+          ✓ 配对失败自动限速：同 IP 连续失败 8 次即拉黑 10 分钟<br>
+          ✓ 数据仅在你的设备与 PC 之间流动，不经任何第三方服务器<br>
+          ⓘ 当前为家庭局域网模式，请勿在公共 WiFi 使用；点对点加密在后续版本提供
+        </div>
+      </div>
     </section>
   </main>
 
@@ -91,6 +109,16 @@
     <textarea class="input" id="copyModalText" rows="5"></textarea>
     <div style="height:14px"></div>
     <button class="btn plain" onclick="document.getElementById('copyModal').classList.add('hidden')">关闭</button>
+  </div>
+</div>
+
+<!-- 媒体预览弹层 -->
+<div id="previewModal" class="overlay dark hidden" onclick="if(event.target===this)closePreview()">
+  <button id="previewClose" onclick="closePreview()">✕</button>
+  <div id="previewContent"></div>
+  <div id="previewBar">
+    <span id="previewName"></span>
+    <span id="previewMeta"></span>
   </div>
 </div>
 
