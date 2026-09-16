@@ -79,6 +79,7 @@ public class MainActivity extends Activity {
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        System.setProperty("http.keepAlive", "false");
         prefs = getPreferences(Context.MODE_PRIVATE);
         serverUrl = prefs.getString("server_url", "");
 
@@ -480,6 +481,7 @@ public class MainActivity extends Activity {
                     conn.setDoOutput(true);
                     conn.setConnectTimeout(8000);
                     conn.setReadTimeout(60000);
+                    conn.setRequestProperty("Connection", "close");
                     conn.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
                     conn.setChunkedStreamingMode(65536);
 
@@ -507,6 +509,15 @@ public class MainActivity extends Activity {
                     try { conn.getInputStream().close(); } catch (Exception ignored) {}
                     success = code == 200;
                     if (!success) err = "HTTP " + code;
+                    try {
+                        InputStream es = conn.getErrorStream();
+                        if (es != null) {
+                            byte[] b2 = new byte[300];
+                            int n2 = es.read(b2);
+                            if (n2 > 0) err += " " + new String(b2, 0, n2, StandardCharsets.UTF_8);
+                            es.close();
+                        }
+                    } catch (Exception ignored) {}
                 } catch (Exception e) {
                     err = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
                 } finally {

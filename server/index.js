@@ -105,6 +105,13 @@ function startServer(opts) {
     }
     next();
   });
+  app.use('/api', (req, res, next) => {
+    const start = Date.now();
+    res.on('finish', () => {
+      console.log('[api]', new Date().toLocaleTimeString(), req.method, req.originalUrl.split('?')[0], res.statusCode, (Date.now() - start) + 'ms');
+    });
+    next();
+  });
   app.use(express.static(webDir));
 
   const upload = multer({
@@ -208,6 +215,13 @@ function startServer(opts) {
     res.json({ ok: true });
   });
 
+  // 统一错误处理：上传解析失败等
+  app.use((err, req, res, next) => {
+    console.error('[server-error]', new Date().toLocaleTimeString(), req.method, req.path, err.message || err);
+    if (res.headersSent) return next(err);
+    const code = (err && err.code === 'LIMIT_FILE_SIZE') ? 413 : (err.status || 500);
+    res.status(code).json({ error: err.message || '服务器错误' });
+  });
   // ---------- WebSocket ----------
   const server = http.createServer(app);
   const wss = new WebSocketServer({ server, path: '/ws' });
