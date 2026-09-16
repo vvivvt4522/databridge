@@ -481,9 +481,7 @@ public class MainActivity extends Activity {
                     conn.setConnectTimeout(8000);
                     conn.setReadTimeout(60000);
                     conn.setRequestProperty("Content-Type", "multipart/form-data; boundary=" + boundary);
-                    if (size > 0) conn.setFixedLengthStreamingMode(
-                            (int) Math.min(size + 2048 + name.getBytes(StandardCharsets.UTF_8).length, Integer.MAX_VALUE));
-                    else conn.setChunkedStreamingMode(65536);
+                    conn.setChunkedStreamingMode(65536);
 
                     OutputStream out = conn.getOutputStream();
                     out.write(("--" + boundary + "\r\n"
@@ -518,8 +516,7 @@ public class MainActivity extends Activity {
                 final String errStr = err;
                 final String nameStr = name;
                 main.post(() -> Toast.makeText(MainActivity.this,
-                        okFlag ? "已发送 " + nameStr : "发送失败 " + nameStr + "：" + errStr,
-                        Toast.LENGTH_SHORT).show());
+                        okFlag ? "已发送 " + nameStr : "发送失败 " + nameStr + "：" + errStr, Toast.LENGTH_LONG).show());
                 if (success) ok++;
             }
             final int okCount = ok;
