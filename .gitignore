@@ -1,0 +1,11 @@
+# ===== DataBridge 项目忽略清单 =====
+# Node 依赖与构建产物
+node_modules/
+package-lock.json
+# 运行时数据（含配对 token，绝不能上传）
+server/data/
+# 安卓构建产物
+DataBridge.apk
+# 本机工具与日志
+*.log
+.zcode/

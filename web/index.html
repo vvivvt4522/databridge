@@ -1,0 +1,100 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
+<meta name="theme-color" content="#2b6cff">
+<title>三端互通</title>
+<link rel="stylesheet" href="/style.css">
+<link rel="icon" href="/favicon.svg" type="image/svg+xml">
+</head>
+<body>
+<div id="app">
+  <header>
+    <div class="logo">⇄</div>
+    <div class="titles"><b>三端互通</b><span id="connState">连接中…</span></div>
+    <div style="flex:1"></div>
+    <span id="myName" style="font-size:12px;color:var(--sub);max-width:90px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap"></span>
+  </header>
+
+  <main id="main">
+    <!-- 文件 -->
+    <section id="tab-files" class="tab active">
+      <div class="dropzone" id="dropzone">
+        <div style="font-size:34px">📤</div>
+        <div>点击选择文件，或拖拽到此处</div>
+        <div style="font-size:12px;margin-top:4px">支持图片 / 视频 / 任意文件 · 单文件最大 2GB</div>
+      </div>
+      <input type="file" id="fileInput" multiple hidden>
+      <div class="card">
+        <h3>传输记录（保存在 PC 的 received 目录）</h3>
+        <div id="fileList"><div class="empty">暂无文件，传一张试试</div></div>
+      </div>
+    </section>
+
+    <!-- 剪贴板 -->
+    <section id="tab-clip" class="tab">
+      <div class="card">
+        <h3>发送</h3>
+        <button class="btn" id="btnSendClip">📋 发送我的剪贴板</button>
+        <div style="height:10px"></div>
+        <textarea class="input" id="clipInput" rows="3" placeholder="或在这里输入 / 长按粘贴文字、链接…"></textarea>
+        <div style="height:10px"></div>
+        <button class="btn plain" id="btnSendText">发送文字</button>
+      </div>
+      <div class="card">
+        <h3>收到的内容（点击"复制"即可粘贴到任何 App）</h3>
+        <div id="clipList"><div class="empty">暂无内容</div></div>
+      </div>
+    </section>
+
+    <!-- 设备 -->
+    <section id="tab-devices" class="tab">
+      <div class="card">
+        <h3>在线设备</h3>
+        <div id="deviceList"><div class="empty">加载中…</div></div>
+      </div>
+      <div class="card qrbox">
+        <h3 style="text-align:left">连接本服务器</h3>
+        <img id="qrImg" alt="二维码" hidden>
+        <div class="url" id="connUrl"></div>
+        <select id="ipSelect" hidden></select>
+        <div style="height:8px"></div>
+        <button class="btn ghost small" id="btnChangeServer">更换服务器 / 重新配对</button>
+      </div>
+    </section>
+  </main>
+
+  <nav>
+    <button data-tab="tab-files" class="active"><span class="ic">📁</span>文件</button>
+    <button data-tab="tab-clip"><span class="ic">📋</span>剪贴板</button>
+    <button data-tab="tab-devices"><span class="ic">📱</span>设备</button>
+  </nav>
+</div>
+
+<!-- 首次配对 -->
+<div id="setup" class="overlay hidden">
+  <div class="panel">
+    <h2>连接服务器</h2>
+    <p>在 PC 端窗口可以看到完整地址（含配对码）。粘贴到这里，一次配对长期有效。</p>
+    <input class="input" id="setupUrl" placeholder="http://192.168.x.x:8322/?t=xxxx">
+    <div style="height:14px"></div>
+    <button class="btn" id="btnSetupGo">连接</button>
+  </div>
+</div>
+
+<!-- 手动复制弹层 -->
+<div id="copyModal" class="overlay hidden" onclick="if(event.target===this)this.classList.add('hidden')">
+  <div class="panel">
+    <h2>请手动复制</h2>
+    <p>当前浏览器限制了自动复制，请长按全选下面文字手动复制：</p>
+    <textarea class="input" id="copyModalText" rows="5"></textarea>
+    <div style="height:14px"></div>
+    <button class="btn plain" onclick="document.getElementById('copyModal').classList.add('hidden')">关闭</button>
+  </div>
+</div>
+
+<div id="toast"></div>
+<script src="/app.js"></script>
+</body>
+</html>

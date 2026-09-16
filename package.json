@@ -1,0 +1,23 @@
+{
+  "name": "databridge",
+  "version": "0.1.0",
+  "description": "三端数据互通工具 - PC/Android/iPad 之间互传图片与剪贴板内容",
+  "main": "pc/main.js",
+  "scripts": {
+    "start": "electron .",
+    "server": "node server/index.js",
+    "icons": "node tools/gen-icons.js"
+  },
+  "author": "Yesnoi",
+  "license": "MIT",
+  "dependencies": {
+    "bonjour-service": "^1.2.1",
+    "express": "^4.19.2",
+    "multer": "^1.4.5-lts.1",
+    "qrcode": "^1.5.4",
+    "ws": "^8.17.1"
+  },
+  "devDependencies": {
+    "electron": "^31.3.0"
+  }
+}
