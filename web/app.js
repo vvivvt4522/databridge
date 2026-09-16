@@ -1,5 +1,5 @@
 'use strict';
-/* 三端互通 - 共享前端逻辑 v0.2（PC Electron / Android WebView / iOS WKWebView / 浏览器通用） */
+/* 三端互通 - 共享前端逻辑 v0.2.1（PC Electron / Android WebView / iOS WKWebView / 浏览器通用） */
 
 const $ = (s) => document.querySelector(s);
 const LS = {
@@ -22,6 +22,7 @@ const CAP = {
   setClip: !!(B && B.setClipboard),
   save: !!(B && (B.saveFile || B.saveFromUrl)),
   reveal: !!(B && B.revealFile),
+  nativePick: !!(B && B.sendFiles),   // 安卓原生选择器+原生上传，绕开 WebView 文件选择的各种坑
 };
 const MY_KIND = (B && B.kind) || detectKind();
 function detectKind() {
@@ -57,6 +58,9 @@ function isImage(f) { return /^image\//.test(f.mime || ''); }
 function isVideo(f) { return /^video\//.test(f.mime || ''); }
 
 function apiUrl(p) { return LS.server.replace(/\/$/, '') + p + (p.includes('?') ? '&' : '?') + 't=' + LS.token; }
+function fileUrl(id, preview) {
+  return apiUrl('/api/file/' + id + (preview ? '?preview=1' : ''));
+}
 async function api(p, opt) {
   opt = opt || {};
   opt.headers = Object.assign({ 'x-token': LS.token }, opt.headers || {});
@@ -108,7 +112,7 @@ function connectWS() {
   ws.onopen = () => {
     setConn(true);
     ws.send(JSON.stringify({ type: 'hello', name: myName(), kind: MY_KIND }));
-    loadFiles(); loadTexts();   // 重连后立即刷新，补齐断线期间的内容
+    loadFiles(); loadTexts();
   };
   ws.onmessage = (ev) => {
     let m; try { m = JSON.parse(ev.data); } catch (e) { return; }
@@ -144,17 +148,15 @@ function onIncomingFile(item) {
   if (CAP.save && LS.autosave) {
     autoSave(item);
   } else {
-    toast('收到文件：' + item.name + '（点它预览）', 3200);
+    toast('收到文件：' + item.name, 3200);
   }
 }
-
-/* 自动保存：收到文件直接落到相册/下载 */
 async function autoSave(item) {
   try {
     await saveItem(item);
     toast('已自动保存：' + item.name, 2600);
   } catch (e) {
-    toast('自动保存失败：' + item.name + '，可在列表里手动保存', 3200);
+    toast('自动保存失败：' + item.name + '，可手动保存', 3200);
   }
 }
 
@@ -170,18 +172,40 @@ async function loadFiles() {
 function fileItem(f) {
   const div = document.createElement('div');
   div.className = 'item';
-  const thumb = isImage(f)
-    ? '<img class="thumb" loading="lazy" src="' + apiUrl('/api/file/' + f.id + '&preview=1') + '">'
-    : '<div class="fileicon">' + (isVideo(f) ? '🎬' : '📄') + '</div>';
   const canPreview = isImage(f) || isVideo(f);
-  div.innerHTML = thumb +
-    '<div class="info"><div class="name' + (canPreview ? ' clickable' : '') + '">' + esc(f.name) + '</div>' +
-    '<div class="meta">' + fmtSize(f.size) + ' · ' + esc(f.from) + ' · ' + fmtTime(f.time) + '</div></div>' +
-    '<div class="actions"></div>';
-  const act = div.querySelector('.actions');
+  if (isImage(f)) {
+    const img = document.createElement('img');
+    img.className = 'thumb';
+    img.loading = 'lazy';
+    img.src = fileUrl(f.id, true);
+    img.onclick = () => openPreview(f);
+    img.onerror = () => {
+      const d = document.createElement('div');
+      d.className = 'fileicon'; d.textContent = '🖼️';
+      img.replaceWith(d);
+    };
+    div.appendChild(img);
+  } else {
+    const ic = document.createElement('div');
+    ic.className = 'fileicon';
+    ic.textContent = isVideo(f) ? '🎬' : '📄';
+    div.appendChild(ic);
+  }
+  const info = document.createElement('div');
+  info.className = 'info';
+  const nameEl = document.createElement('div');
+  nameEl.className = 'name' + (canPreview ? ' clickable' : '');
+  nameEl.textContent = f.name;
+  if (canPreview) nameEl.onclick = () => openPreview(f);
+  const meta = document.createElement('div');
+  meta.className = 'meta';
+  meta.textContent = fmtSize(f.size) + ' · ' + f.from + ' · ' + fmtTime(f.time);
+  info.appendChild(nameEl); info.appendChild(meta);
+  div.appendChild(info);
 
+  const act = document.createElement('div');
+  act.className = 'actions';
   if (canPreview) {
-    div.querySelector('.name').onclick = () => openPreview(f);
     const pv = document.createElement('button');
     pv.className = 'linkbtn'; pv.textContent = '预览';
     pv.onclick = () => openPreview(f);
@@ -204,7 +228,7 @@ function fileItem(f) {
     act.appendChild(b);
   } else {
     const a = document.createElement('a');
-    a.className = 'linkbtn'; a.textContent = '下载'; a.href = apiUrl('/api/file/' + f.id);
+    a.className = 'linkbtn'; a.textContent = '下载'; a.href = fileUrl(f.id);
     a.setAttribute('download', f.name);
     act.appendChild(a);
   }
@@ -212,18 +236,19 @@ function fileItem(f) {
   del.className = 'linkbtn del'; del.textContent = '删除';
   del.onclick = async () => { if (confirm('删除 ' + f.name + ' ?')) { await api('/api/file/' + f.id, { method: 'DELETE' }); loadFiles(); } };
   act.appendChild(del);
+  div.appendChild(act);
   return div;
 }
 
 /* 保存到本机：优先原生流式下载（无大小限制），退回 base64 */
 async function saveItem(f) {
   if (B && B.saveFromUrl) {
-    const ok = await Promise.resolve(B.saveFromUrl(apiUrl('/api/file/' + f.id), f.name, f.mime || 'application/octet-stream'));
+    const ok = await Promise.resolve(B.saveFromUrl(fileUrl(f.id), f.name, f.mime || 'application/octet-stream'));
     if (ok === false) throw new Error('原生保存失败');
     return;
   }
   if (f.size > 100 * 1048576) throw new Error('文件过大，请用浏览器下载');
-  const r = await fetch(apiUrl('/api/file/' + f.id));
+  const r = await fetch(fileUrl(f.id));
   const blob = await r.blob();
   const b64 = await new Promise((res, rej) => {
     const fr = new FileReader();
@@ -239,13 +264,29 @@ async function saveItem(f) {
 function openPreview(f) {
   const c = $('#previewContent');
   $('#previewName').textContent = f.name;
-  $('#previewMeta').textContent = fmtSize(f.size) + ' · ' + esc(f.from);
+  $('#previewMeta').textContent = fmtSize(f.size) + ' · ' + f.from;
+  c.innerHTML = '';
   if (isImage(f)) {
-    c.innerHTML = '<img src="' + apiUrl('/api/file/' + f.id + '&preview=1') + '">';
+    const img = document.createElement('img');
+    img.src = fileUrl(f.id, true);
+    img.onerror = () => {
+      c.innerHTML = '';
+      const d = document.createElement('div');
+      d.className = 'noPreview';
+      d.textContent = '图片加载失败，请检查与 PC 的连接';
+      c.appendChild(d);
+    };
+    c.appendChild(img);
   } else if (isVideo(f)) {
-    c.innerHTML = '<video src="' + apiUrl('/api/file/' + f.id + '&preview=1') + '" controls autoplay playsinline></video>';
+    const v = document.createElement('video');
+    v.src = fileUrl(f.id, true);
+    v.controls = true; v.autoplay = true; v.playsInline = true;
+    c.appendChild(v);
   } else {
-    c.innerHTML = '<div class="noPreview">该类型暂不支持预览<br>可点"保存"到本机查看</div>';
+    const d = document.createElement('div');
+    d.className = 'noPreview';
+    d.textContent = '该类型暂不支持预览，可点"保存"到本机查看';
+    c.appendChild(d);
   }
   $('#previewModal').classList.remove('hidden');
 }
@@ -257,9 +298,17 @@ document.addEventListener('keydown', (e) => { if (e.key === 'Escape') closePrevi
 
 /* ---------- 上传 ---------- */
 const dz = $('#dropzone');
-dz.onclick = () => $('#fileInputMedia').click();
-$('#btnPickMedia').onclick = () => $('#fileInputMedia').click();
-$('#btnPickFile').onclick = () => $('#fileInputFile').click();
+dz.onclick = () => pickMedia();
+$('#btnPickMedia').onclick = () => pickMedia();
+$('#btnPickFile').onclick = () => pickAny();
+function pickMedia() {
+  if (CAP.nativePick) { B.sendFiles(true); return; }
+  $('#fileInputMedia').click();
+}
+function pickAny() {
+  if (CAP.nativePick) { B.sendFiles(false); return; }
+  $('#fileInputFile').click();
+}
 $('#fileInputMedia').onchange = (e) => { uploadFiles(e.target.files); e.target.value = ''; };
 $('#fileInputFile').onchange = (e) => { uploadFiles(e.target.files); e.target.value = ''; };
 ['dragover', 'dragenter'].forEach(ev => dz.addEventListener(ev, e => { e.preventDefault(); dz.classList.add('drag'); }));
@@ -405,7 +454,7 @@ function initAutosave() {
   chk.onchange = () => { LS.autosave = chk.checked; toast(chk.checked ? '已开启自动保存' : '已关闭自动保存'); };
 }
 
-/* 页面重新可见时刷新（手机切后台回来） */
+/* 页面重新可见时刷新 */
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden) { loadFiles(); loadTexts(); }
 });

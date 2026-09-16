@@ -184,3 +184,8 @@ nav button .ic { display: block; font-size: 20px; margin-bottom: 2px; }
 #previewName { flex: 1; word-break: break-all; font-weight: 600; }
 #previewMeta { color: #9aa4bd; flex: none; }
 .item .name.clickable { color: var(--brand); cursor: pointer; }
+
+/* ===== v0.2.1 预览修复：内容层不拦截点击，点任意空白处可退出 ===== */
+#previewContent { pointer-events: none; }
+#previewContent img, #previewContent video { pointer-events: auto; }
+#previewBar { pointer-events: none; }
