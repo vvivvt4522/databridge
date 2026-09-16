@@ -5,13 +5,14 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.ClipData;
 import android.content.ClipboardManager;
-import android.content.ContentResolver;
 import android.content.ContentValues;
 import android.content.Context;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.database.Cursor;
+import android.graphics.Color;
+import android.graphics.drawable.GradientDrawable;
 import android.net.ConnectivityManager;
 import android.net.Network;
 import android.net.Uri;
@@ -25,12 +26,14 @@ import android.os.Looper;
 import android.provider.MediaStore;
 import android.provider.OpenableColumns;
 import android.util.Base64;
+import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.webkit.JavascriptInterface;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
+import android.webkit.WebResourceError;
 import android.webkit.WebResourceRequest;
 import android.webkit.WebSettings;
 import android.webkit.WebView;
@@ -39,6 +42,7 @@ import android.widget.Button;
 import android.widget.EditText;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
+import android.widget.ProgressBar;
 import android.widget.ScrollView;
 import android.widget.TextView;
 import android.widget.Toast;
@@ -52,7 +56,6 @@ import java.net.InetAddress;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
 import java.util.Map;
 
 public class MainActivity extends Activity {
@@ -61,12 +64,19 @@ public class MainActivity extends Activity {
     private static final int REQ_STORAGE_PERM = 1002;
     private static final int REQ_NATIVE_MEDIA = 2001;
     private static final int REQ_NATIVE_FILE = 2002;
-    private static final long AUTO_DISCOVER_TIMEOUT = 7000;
+    private static final long AUTO_DISCOVER_TIMEOUT = 6500;
+
+    private static final int COLOR_BRAND = 0xFF2B6CFF;
+    private static final int COLOR_BRAND_DARK = 0xFF1E46B8;
+    private static final int COLOR_PANEL = 0xFFF4F6FB;
 
     private WebView webView;
+    private LinearLayout splash;
+    private TextView splashStatus;
     private LinearLayout serverList;
     private TextView statusText;
     private FrameLayout settingsPanel;
+    private TextView gear;
     private ValueCallback<Uri[]> filePathCallback;
     private SharedPreferences prefs;
     private NsdManager nsd;
@@ -74,6 +84,7 @@ public class MainActivity extends Activity {
     private String serverUrl = "";
     private String lastLoadedUrl = "";
     private volatile boolean autoConnecting = false;
+    private volatile boolean discoverySilent = false;
 
     @SuppressLint("SetJavaScriptEnabled")
     @Override
@@ -99,6 +110,19 @@ public class MainActivity extends Activity {
                     return true;
                 }
                 return false;
+            }
+
+            @Override
+            public void onPageFinished(WebView v, String url) {
+                if (settingsPanel.getVisibility() != View.VISIBLE) hideSplash();
+            }
+
+            @Override
+            public void onReceivedError(WebView v, WebResourceRequest req, WebResourceError err) {
+                if (req != null && req.isForMainFrame()) {
+                    showSplash("连接已断开，正在重连…");
+                    main.postDelayed(() -> { if (!autoConnecting) autoConnect(); }, 2500);
+                }
             }
         });
         webView.setWebChromeClient(new WebChromeClient() {
@@ -129,36 +153,26 @@ public class MainActivity extends Activity {
         autoConnect();
     }
 
-    /* ================= 自动连接 ================= */
+    /* ================= 自动连接：ping 与发现并行，谁快用谁 ================= */
     private void autoConnect() {
         if (autoConnecting) return;
         autoConnecting = true;
+        discoverySilent = true;
+        showSplash("正在自动连接…");
         new Thread(() -> {
             String saved = prefs.getString("server_url", "");
-            boolean savedOk = !saved.isEmpty() && pingServer(saved);
-            if (savedOk && saved.equals(lastLoadedUrl)) {
-                autoConnecting = false;
-                return;
+            if (!saved.isEmpty() && pingServer(saved)) {
+                main.post(() -> { if (autoConnecting) { autoConnecting = false; loadApp(saved); } });
             }
-            if (savedOk) {
-                main.post(() -> { autoConnecting = false; loadApp(saved); });
-                return;
-            }
-            main.post(() -> {
-                statusText.setText("正在自动搜索 PC…");
-                serverList.removeAllViews();
-                settingsPanel.setVisibility(View.GONE);
-                webView.setVisibility(View.VISIBLE);
-                startDiscovery(true);
-                main.postDelayed(() -> {
-                    if (autoConnecting) {
-                        autoConnecting = false;
-                        stopDiscoverySafe();
-                        showServerSelect();
-                    }
-                }, AUTO_DISCOVER_TIMEOUT);
-            });
         }).start();
+        startDiscovery(true);
+        main.postDelayed(() -> {
+            if (autoConnecting) {
+                autoConnecting = false;
+                stopDiscoverySafe();
+                showServerSelect();
+            }
+        }, AUTO_DISCOVER_TIMEOUT);
     }
 
     private boolean pingServer(String url) {
@@ -167,6 +181,7 @@ public class MainActivity extends Activity {
             c.setConnectTimeout(1500);
             c.setReadTimeout(2000);
             c.setRequestMethod("GET");
+            c.setRequestProperty("Connection", "close");
             int code = c.getResponseCode();
             try { c.getInputStream().close(); } catch (Exception ignored) {}
             return code == 200;
@@ -181,6 +196,7 @@ public class MainActivity extends Activity {
             cm.registerDefaultNetworkCallback(new ConnectivityManager.NetworkCallback() {
                 @Override public void onAvailable(Network network) {
                     main.postDelayed(() -> {
+                        if (autoConnecting) return;
                         String saved = prefs.getString("server_url", "");
                         boolean alive = !saved.isEmpty() && pingServer(saved);
                         if (!alive) autoConnect();
@@ -190,83 +206,262 @@ public class MainActivity extends Activity {
         } catch (Exception ignored) {}
     }
 
-    /* ================= UI ================= */
-    private int dp(int v) { return Math.round(v * getResources().getDisplayMetrics().density); }
+    /* ================= 界面骨架 ================= */
+    private int dp(int v) { return Math.round(TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v, getResources().getDisplayMetrics())); }
+
+    private GradientDrawable rounded(int color, int radiusDp) {
+        GradientDrawable d = new GradientDrawable();
+        d.setColor(color);
+        d.setCornerRadius(dp(radiusDp));
+        return d;
+    }
+
+    private GradientDrawable brandGradient() {
+        GradientDrawable d = new GradientDrawable(GradientDrawable.Orientation.TL_BR,
+                new int[]{COLOR_BRAND, 0xFF6A3CFF});
+        return d;
+    }
 
     private void buildUi() {
         FrameLayout root = new FrameLayout(this);
+        root.setBackgroundColor(COLOR_PANEL);
         root.addView(webView, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
-        settingsPanel = new FrameLayout(this);
-        ScrollView sc = new ScrollView(this);
-        sc.setBackgroundColor(0xFFF4F6FB);
-        LinearLayout box = new LinearLayout(this);
-        box.setOrientation(LinearLayout.VERTICAL);
-        box.setPadding(dp(20), dp(40), dp(20), dp(20));
+        /* ---- 启动页（替代白屏） ---- */
+        splash = new LinearLayout(this);
+        splash.setOrientation(LinearLayout.VERTICAL);
+        splash.setGravity(Gravity.CENTER);
+        splash.setBackground(brandGradient());
+        splash.setClickable(true);
 
-        TextView title = new TextView(this);
-        title.setText("连接服务器");
-        title.setTextSize(20); title.setTypeface(null, android.graphics.Typeface.BOLD);
-        box.addView(title);
+        TextView logo = new TextView(this);
+        logo.setText("⇄");
+        logo.setTextColor(Color.WHITE);
+        logo.setTextSize(40);
+        logo.setGravity(Gravity.CENTER);
+        LinearLayout.LayoutParams logoLp = new LinearLayout.LayoutParams(dp(84), dp(84));
+        logoLp.setMargins(0, 0, 0, dp(18));
+        logo.setBackground(rounded(0x33FFFFFF, 24));
+        splash.addView(logo, logoLp);
 
-        statusText = new TextView(this);
-        statusText.setText("正在搜索同一 WiFi 下的 PC…");
-        statusText.setPadding(0, dp(14), 0, dp(14));
-        box.addView(statusText);
+        TextView brand = new TextView(this);
+        brand.setText("三端互通");
+        brand.setTextColor(Color.WHITE);
+        brand.setTextSize(24);
+        brand.setTypeface(null, android.graphics.Typeface.BOLD);
+        splash.addView(brand);
 
-        serverList = new LinearLayout(this);
-        serverList.setOrientation(LinearLayout.VERTICAL);
-        box.addView(serverList);
+        splashStatus = new TextView(this);
+        splashStatus.setText("正在启动…");
+        splashStatus.setTextColor(0xFFD8E2FF);
+        splashStatus.setTextSize(13);
+        LinearLayout.LayoutParams stLp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        stLp.setMargins(0, dp(10), 0, dp(22));
+        splash.addView(splashStatus, stLp);
 
-        Button manual = new Button(this);
-        manual.setText("手动输入地址");
-        manual.setOnClickListener(v -> manualInput());
-        box.addView(manual);
+        ProgressBar bar = new ProgressBar(this);
+        bar.setIndeterminateTintList(android.content.res.ColorStateList.valueOf(Color.WHITE));
+        splash.addView(bar, new LinearLayout.LayoutParams(dp(32), dp(32)));
 
-        TextView tip = new TextView(this);
-        tip.setText("提示：手机与电脑需在同一 WiFi，且 PC 端已启动并放行防火墙。");
-        tip.setTextSize(12); tip.setTextColor(0xFF7A839E);
-        tip.setPadding(0, dp(10), 0, 0);
-        box.addView(tip);
-
-        sc.addView(box);
-        settingsPanel.addView(sc, new FrameLayout.LayoutParams(
+        root.addView(splash, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+        /* ---- 服务器选择页 ---- */
+        settingsPanel = new FrameLayout(this);
+        settingsPanel.setBackgroundColor(COLOR_PANEL);
         settingsPanel.setVisibility(View.GONE);
+        settingsPanel.addView(buildSettingsContent(), new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         root.addView(settingsPanel, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
-        Button gear = new Button(this);
-        gear.setText("⚙");
-        gear.setAlpha(0.55f);
-        FrameLayout.LayoutParams glp = new FrameLayout.LayoutParams(dp(44), dp(44), Gravity.TOP | Gravity.END);
-        glp.setMargins(0, dp(8), dp(8), 0);
+        /* ---- 右上角连接按钮（52dp 圆形） ---- */
+        gear = new TextView(this);
+        gear.setText("⇄");
+        gear.setTextColor(Color.WHITE);
+        gear.setTextSize(20);
+        gear.setGravity(Gravity.CENTER);
+        gear.setBackground(rounded(0x66000000, 26));
+        FrameLayout.LayoutParams glp = new FrameLayout.LayoutParams(dp(52), dp(52), Gravity.TOP | Gravity.END);
+        glp.setMargins(0, dp(14), dp(14), 0);
         gear.setOnClickListener(v -> new AlertDialog.Builder(this)
-                .setMessage("要重新选择服务器吗？")
-                .setPositiveButton("是", (d, w) -> { autoConnecting = false; showServerSelect(); })
+                .setMessage("要重新选择连接的 PC 吗？")
+                .setPositiveButton("是", (d, w) -> { autoConnecting = false; stopDiscoverySafe(); showServerSelect(); })
                 .setNegativeButton("取消", null).show());
         root.addView(gear, glp);
 
         setContentView(root);
     }
 
+    /* ================= 服务器选择页 ================= */
+    private View buildSettingsContent() {
+        ScrollView sc = new ScrollView(this);
+        sc.setBackgroundColor(COLOR_PANEL);
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+
+        /* 品牌头部 */
+        LinearLayout header = new LinearLayout(this);
+        header.setOrientation(LinearLayout.VERTICAL);
+        header.setBackground(brandGradient());
+        header.setPadding(dp(24), dp(40), dp(24), dp(48));
+        TextView hTitle = new TextView(this);
+        hTitle.setText("三端互通");
+        hTitle.setTextColor(Color.WHITE);
+        hTitle.setTextSize(24);
+        hTitle.setTypeface(null, android.graphics.Typeface.BOLD);
+        header.addView(hTitle);
+        TextView hSub = new TextView(this);
+        hSub.setText("连接到局域网中的 PC");
+        hSub.setTextColor(0xFFD8E2FF);
+        hSub.setTextSize(13);
+        hSub.setPadding(0, dp(6), 0, 0);
+        header.addView(hSub);
+        box.addView(header);
+
+        /* 状态卡片（上浮压住头部） */
+        LinearLayout statusCard = new LinearLayout(this);
+        statusCard.setOrientation(LinearLayout.HORIZONTAL);
+        statusCard.setGravity(Gravity.CENTER_VERTICAL);
+        statusCard.setBackground(rounded(Color.WHITE, 14));
+        LinearLayout.LayoutParams sclp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        sclp.setMargins(dp(16), dp(-26), dp(16), dp(18));
+        statusCard.setElevation(dp(3));
+        statusCard.setPadding(dp(16), dp(14), dp(16), dp(14));
+        TextView sIcon = new TextView(this);
+        sIcon.setText("🔍");
+        sIcon.setTextSize(20);
+        statusCard.addView(sIcon);
+        LinearLayout sCol = new LinearLayout(this);
+        sCol.setOrientation(LinearLayout.VERTICAL);
+        sCol.setPadding(dp(12), 0, 0, 0);
+        statusText = new TextView(this);
+        statusText.setText("正在搜索同一 WiFi 下的 PC…");
+        statusText.setTextColor(0xFF1C2333);
+        statusText.setTextSize(15);
+        statusText.setTypeface(null, android.graphics.Typeface.BOLD);
+        sCol.addView(statusText);
+        TextView sSub = new TextView(this);
+        sSub.setText("确保 PC 端已启动，且手机与电脑在同一 WiFi");
+        sSub.setTextColor(0xFF7A839E);
+        sSub.setTextSize(11);
+        sSub.setPadding(0, dp(2), 0, 0);
+        sCol.addView(sSub);
+        statusCard.addView(sCol);
+        box.addView(statusCard);
+
+        /* 发现到的 PC 列表 */
+        LinearLayout listWrap = new LinearLayout(this);
+        listWrap.setOrientation(LinearLayout.VERTICAL);
+        listWrap.setPadding(dp(16), 0, dp(16), 0);
+        serverList = listWrap;
+        box.addView(serverList);
+
+        /* 手动输入按钮（描边样式） */
+        TextView manual = new TextView(this);
+        manual.setText("＋ 手动输入地址");
+        manual.setTextColor(COLOR_BRAND);
+        manual.setTextSize(15);
+        manual.setTypeface(null, android.graphics.Typeface.BOLD);
+        manual.setGravity(Gravity.CENTER);
+        manual.setPadding(dp(14), dp(14), dp(14), dp(14));
+        GradientDrawable outline = new GradientDrawable();
+        outline.setColor(Color.WHITE);
+        outline.setCornerRadius(dp(12));
+        outline.setStroke(dp(1), 0xFFB9C8F0);
+        manual.setBackground(outline);
+        LinearLayout.LayoutParams mlp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        mlp.setMargins(dp(16), dp(14), dp(16), 0);
+        manual.setOnClickListener(v -> manualInput());
+        box.addView(manual, mlp);
+
+        TextView tip = new TextView(this);
+        tip.setText("连接一次后会自动记住，之后打开 App 将自动连接。搜不到时请检查 PC 端是否启动、防火墙是否放行。");
+        tip.setTextSize(12);
+        tip.setTextColor(0xFF7A839E);
+        tip.setPadding(dp(18), dp(14), dp(18), dp(20));
+        tip.setLineSpacing(0, 1.3f);
+        box.addView(tip);
+
+        sc.addView(box);
+        return sc;
+    }
+
+    private void showSplash(String msg) {
+        splashStatus.setText(msg);
+        splash.setAlpha(1f);
+        splash.setVisibility(View.VISIBLE);
+        settingsPanel.setVisibility(View.GONE);
+        gear.setVisibility(View.GONE);
+        webView.setVisibility(View.VISIBLE);
+    }
+
+    private void hideSplash() {
+        splash.animate().alpha(0f).setDuration(180).withEndAction(() -> splash.setVisibility(View.GONE)).start();
+        gear.setVisibility(View.VISIBLE);
+    }
+
     /* ================= 服务器选择 ================= */
     private void showServerSelect() {
+        discoverySilent = false;
         serverList.removeAllViews();
         statusText.setText("正在搜索同一 WiFi 下的 PC…");
         settingsPanel.setVisibility(View.VISIBLE);
+        splash.setVisibility(View.GONE);
+        gear.setVisibility(View.GONE);
         webView.setVisibility(View.GONE);
         startDiscovery(false);
     }
 
-    private void addServerButton(String name, String url) {
+    private void addServerCard(String name, String url) {
         if (serverList.findViewWithTag(url) != null) return;
-        Button b = new Button(this);
-        b.setText(name);
-        b.setTag(url);
-        b.setOnClickListener(v -> loadApp(url));
-        serverList.addView(b);
+        LinearLayout card = new LinearLayout(this);
+        card.setOrientation(LinearLayout.HORIZONTAL);
+        card.setGravity(Gravity.CENTER_VERTICAL);
+        card.setBackground(rounded(Color.WHITE, 12));
+        card.setPadding(dp(14), dp(12), dp(14), dp(12));
+        LinearLayout.LayoutParams clp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        clp.setMargins(0, 0, 0, dp(10));
+        card.setElevation(dp(2));
+
+        TextView icon = new TextView(this);
+        icon.setText("🖥️");
+        icon.setTextSize(18);
+        icon.setGravity(Gravity.CENTER);
+        icon.setBackground(rounded(0xFFEAF0FF, 10));
+        card.addView(icon, new LinearLayout.LayoutParams(dp(42), dp(42)));
+
+        LinearLayout col = new LinearLayout(this);
+        col.setOrientation(LinearLayout.VERTICAL);
+        col.setPadding(dp(12), 0, 0, 0);
+        TextView n = new TextView(this);
+        n.setText(name);
+        n.setTextColor(0xFF1C2333);
+        n.setTextSize(15);
+        n.setTypeface(null, android.graphics.Typeface.BOLD);
+        col.addView(n);
+        TextView sub = new TextView(this);
+        sub.setText("点击连接");
+        sub.setTextColor(0xFF7A839E);
+        sub.setTextSize(11);
+        sub.setPadding(0, dp(2), 0, 0);
+        col.addView(sub);
+        card.addView(col, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1));
+
+        TextView arrow = new TextView(this);
+        arrow.setText("›");
+        arrow.setTextColor(0xFFB6BECE);
+        arrow.setTextSize(20);
+        card.addView(arrow);
+
+        card.setTag(url);
+        card.setOnClickListener(v -> loadApp(url));
+        serverList.addView(card, clp);
     }
 
     private void startDiscovery(boolean silent) {
@@ -297,11 +492,10 @@ public class MainActivity extends Activity {
                             final String url = "http://" + host.getHostAddress() + ":" + port + "/?t=" + token;
                             final String label = name.replace("DataBridge-", "PC：");
                             main.post(() -> {
-                                if (autoConnecting) {
-                                    autoConnecting = false;
-                                    loadApp(url);
+                                if (discoverySilent) {
+                                    if (autoConnecting) { autoConnecting = false; loadApp(url); }
                                 } else {
-                                    addServerButton(label, url);
+                                    addServerCard(label, url);
                                 }
                             });
                         }
@@ -345,13 +539,14 @@ public class MainActivity extends Activity {
         serverUrl = url;
         lastLoadedUrl = url;
         prefs.edit().putString("server_url", url).apply();
+        stopDiscoverySafe();
         settingsPanel.setVisibility(View.GONE);
         webView.setVisibility(View.VISIBLE);
-        stopDiscoverySafe();
+        showSplash("连接成功，加载页面…");
         webView.loadUrl(url);
     }
 
-    /* ================= WebView 文件选择（无原生桥时的兜底） ================= */
+    /* ================= WebView 文件选择（兜底） ================= */
     private Intent buildPickIntent(WebChromeClient.FileChooserParams params) {
         String[] types = params.getAcceptTypes();
         boolean mediaOnly = types != null && types.length > 0;
@@ -381,12 +576,9 @@ public class MainActivity extends Activity {
         return Intent.createChooser(i, mediaOnly ? "选择照片/视频" : "选择要发送的文件");
     }
 
-    /* ================= 原生选择器 + 原生上传（主要通道） ================= */
-    private boolean nativePickMediaOnly = false;
-
+    /* ================= 原生选择器 + 原生上传 ================= */
     private void launchNativePick(boolean mediaOnly) {
         try {
-            nativePickMediaOnly = mediaOnly;
             Intent i;
             if (mediaOnly && Build.VERSION.SDK_INT >= 33) {
                 i = new Intent(MediaStore.ACTION_PICK_IMAGES);
@@ -467,14 +659,6 @@ public class MainActivity extends Activity {
                 String err = "";
                 HttpURLConnection conn = null;
                 try {
-                    long size = 0;
-                    try (Cursor c = getContentResolver().query(uri, null, null, null, null)) {
-                        if (c != null && c.moveToFirst()) {
-                            int si = c.getColumnIndex(OpenableColumns.SIZE);
-                            if (si >= 0 && !c.isNull(si)) size = c.getLong(si);
-                        }
-                    } catch (Exception ignored) {}
-
                     String boundary = "----DataBridge" + System.currentTimeMillis();
                     conn = (HttpURLConnection) new URL(base).openConnection();
                     conn.setRequestMethod("POST");
@@ -506,18 +690,19 @@ public class MainActivity extends Activity {
                     out.close();
 
                     int code = conn.getResponseCode();
-                    try { conn.getInputStream().close(); } catch (Exception ignored) {}
                     success = code == 200;
-                    if (!success) err = "HTTP " + code;
-                    try {
-                        InputStream es = conn.getErrorStream();
-                        if (es != null) {
-                            byte[] b2 = new byte[300];
-                            int n2 = es.read(b2);
-                            if (n2 > 0) err += " " + new String(b2, 0, n2, StandardCharsets.UTF_8);
-                            es.close();
-                        }
-                    } catch (Exception ignored) {}
+                    if (!success) {
+                        err = "HTTP " + code;
+                        try {
+                            InputStream es = conn.getErrorStream();
+                            if (es != null) {
+                                byte[] b2 = new byte[300];
+                                int n2 = es.read(b2);
+                                if (n2 > 0) err += " " + new String(b2, 0, n2, StandardCharsets.UTF_8);
+                                es.close();
+                            }
+                        } catch (Exception ignored) {}
+                    }
                 } catch (Exception e) {
                     err = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
                 } finally {
@@ -527,7 +712,8 @@ public class MainActivity extends Activity {
                 final String errStr = err;
                 final String nameStr = name;
                 main.post(() -> Toast.makeText(MainActivity.this,
-                        okFlag ? "已发送 " + nameStr : "发送失败 " + nameStr + "：" + errStr, Toast.LENGTH_LONG).show());
+                        okFlag ? "已发送 " + nameStr : "发送失败 " + nameStr + "：" + errStr,
+                        Toast.LENGTH_LONG).show());
                 if (success) ok++;
             }
             final int okCount = ok;
@@ -561,10 +747,18 @@ public class MainActivity extends Activity {
             } catch (Exception e) { return false; }
         }
 
-        /* 原生选择器 + 原生上传（主要发送通道，不受 WebView 限制） */
         @JavascriptInterface
         public void sendFiles(boolean mediaOnly) {
             main.post(() -> launchNativePick(mediaOnly));
+        }
+
+        @JavascriptInterface
+        public void openSettings() {
+            main.post(() -> {
+                autoConnecting = false;
+                stopDiscoverySafe();
+                showServerSelect();
+            });
         }
 
         /* 流式下载保存：任意大小不占内存 */
@@ -601,6 +795,7 @@ public class MainActivity extends Activity {
                 conn = (HttpURLConnection) new URL(url).openConnection();
                 conn.setConnectTimeout(8000);
                 conn.setReadTimeout(30000);
+                conn.setRequestProperty("Connection", "close");
                 InputStream in = conn.getInputStream();
                 byte[] buf = new byte[65536];
                 int n;
@@ -687,6 +882,7 @@ public class MainActivity extends Activity {
         if (settingsPanel.getVisibility() == View.VISIBLE && !serverUrl.isEmpty()) {
             settingsPanel.setVisibility(View.GONE);
             webView.setVisibility(View.VISIBLE);
+            gear.setVisibility(View.VISIBLE);
         } else if (webView.canGoBack()) {
             webView.goBack();
         } else {

@@ -1,5 +1,5 @@
 'use strict';
-/* 三端互通 - 共享前端逻辑 v0.2.1（PC Electron / Android WebView / iOS WKWebView / 浏览器通用） */
+/* 三端互通 - 共享前端逻辑 v0.3（瀑布流文件墙 + 原生桥） */
 
 const $ = (s) => document.querySelector(s);
 const LS = {
@@ -15,14 +15,15 @@ const LS = {
   set autosave(v) { localStorage.setItem('db_autosave', v ? '1' : '0'); },
 };
 
-/* ---------- 原生桥（各端壳注入 window.NativeBridge） ---------- */
+/* ---------- 原生桥 ---------- */
 const B = window.NativeBridge || null;
 const CAP = {
   getClip: !!(B && B.getClipboard),
   setClip: !!(B && B.setClipboard),
   save: !!(B && (B.saveFile || B.saveFromUrl)),
   reveal: !!(B && B.revealFile),
-  nativePick: !!(B && B.sendFiles),   // 安卓原生选择器+原生上传，绕开 WebView 文件选择的各种坑
+  nativePick: !!(B && B.sendFiles),
+  nativeSettings: !!(B && B.openSettings),
 };
 const MY_KIND = (B && B.kind) || detectKind();
 function detectKind() {
@@ -102,7 +103,7 @@ document.querySelectorAll('nav button').forEach(b => {
   };
 });
 
-/* ---------- WebSocket 实时通道 ---------- */
+/* ---------- WebSocket ---------- */
 let ws = null, wsTimer = null;
 function connectWS() {
   clearTimeout(wsTimer);
@@ -145,102 +146,129 @@ function onIncomingText(item) {
 function onIncomingFile(item) {
   loadFiles();
   if (item.kind === MY_KIND) return;
-  if (CAP.save && LS.autosave) {
-    autoSave(item);
-  } else {
-    toast('收到文件：' + item.name, 3200);
-  }
+  if (CAP.save && LS.autosave) autoSave(item);
+  else toast('收到文件：' + item.name, 3200);
 }
 async function autoSave(item) {
   try {
     await saveItem(item);
     toast('已自动保存：' + item.name, 2600);
   } catch (e) {
-    toast('自动保存失败：' + item.name + '，可手动保存', 3200);
+    toast('自动保存失败：' + item.name, 3200);
   }
 }
 
-/* ---------- 文件列表 ---------- */
+/* ---------- 瀑布流文件墙 ---------- */
+function columnCount() { return window.innerWidth >= 1000 ? 3 : 2; }
+
 async function loadFiles() {
   let list;
   try { list = await api('/api/files'); } catch (e) { return; }
   const box = $('#fileList');
   if (!list.length) { box.innerHTML = '<div class="empty">暂无文件，传一张试试</div>'; return; }
   box.innerHTML = '';
-  for (const f of list) box.appendChild(fileItem(f));
+  const n = columnCount();
+  const cols = [];
+  for (let i = 0; i < n; i++) {
+    const c = document.createElement('div');
+    c.className = 'wf-col';
+    box.appendChild(c);
+    cols.push(c);
+  }
+  list.forEach((f, idx) => cols[idx % n].appendChild(fileCard(f)));
 }
-function fileItem(f) {
-  const div = document.createElement('div');
-  div.className = 'item';
+
+function fileCard(f) {
+  const card = document.createElement('div');
+  card.className = 'wcard';
   const canPreview = isImage(f) || isVideo(f);
+
   if (isImage(f)) {
+    const media = document.createElement('div');
+    media.className = 'wmedia';
     const img = document.createElement('img');
-    img.className = 'thumb';
     img.loading = 'lazy';
     img.src = fileUrl(f.id, true);
     img.onclick = () => openPreview(f);
-    img.onerror = () => {
-      const d = document.createElement('div');
-      d.className = 'fileicon'; d.textContent = '🖼️';
-      img.replaceWith(d);
-    };
-    div.appendChild(img);
+    img.onerror = () => { media.innerHTML = ''; media.appendChild(iconBox('🖼️')); };
+    media.appendChild(img);
+    card.appendChild(media);
+  } else if (isVideo(f)) {
+    const media = document.createElement('div');
+    media.className = 'wmedia';
+    const v = document.createElement('video');
+    v.preload = 'metadata';
+    v.muted = true;
+    v.playsInline = true;
+    v.src = fileUrl(f.id, true) + '#t=0.1';
+    v.onclick = () => openPreview(f);
+    const play = document.createElement('div');
+    play.className = 'wplay';
+    play.textContent = '▶';
+    media.appendChild(v);
+    media.appendChild(play);
+    v.onerror = () => { media.innerHTML = ''; media.appendChild(iconBox('🎬')); };
+    card.appendChild(media);
   } else {
-    const ic = document.createElement('div');
-    ic.className = 'fileicon';
-    ic.textContent = isVideo(f) ? '🎬' : '📄';
-    div.appendChild(ic);
+    card.appendChild(iconBox('📄'));
   }
+
   const info = document.createElement('div');
-  info.className = 'info';
+  info.className = 'winfo';
   const nameEl = document.createElement('div');
-  nameEl.className = 'name' + (canPreview ? ' clickable' : '');
+  nameEl.className = 'wname';
   nameEl.textContent = f.name;
-  if (canPreview) nameEl.onclick = () => openPreview(f);
+  if (canPreview) { nameEl.style.cursor = 'pointer'; nameEl.onclick = () => openPreview(f); }
   const meta = document.createElement('div');
-  meta.className = 'meta';
+  meta.className = 'wmeta';
   meta.textContent = fmtSize(f.size) + ' · ' + f.from + ' · ' + fmtTime(f.time);
-  info.appendChild(nameEl); info.appendChild(meta);
-  div.appendChild(info);
+  info.appendChild(nameEl);
+  info.appendChild(meta);
+  card.appendChild(info);
 
   const act = document.createElement('div');
-  act.className = 'actions';
-  if (canPreview) {
-    const pv = document.createElement('button');
-    pv.className = 'linkbtn'; pv.textContent = '预览';
-    pv.onclick = () => openPreview(f);
-    act.appendChild(pv);
-  }
+  act.className = 'wactions';
   if (CAP.save) {
     const b = document.createElement('button');
-    b.className = 'linkbtn'; b.textContent = '保存';
-    b.onclick = async () => {
+    b.className = 'wbtn'; b.textContent = '⤓ 保存';
+    b.onclick = async (e) => {
+      e.stopPropagation();
       b.textContent = '保存中…';
       try { await saveItem(f); toast('已保存'); }
-      catch (e) { toast('保存失败：' + e.message); }
-      b.textContent = '保存';
+      catch (e2) { toast('保存失败：' + e2.message); }
+      b.textContent = '⤓ 保存';
     };
     act.appendChild(b);
   } else if (CAP.reveal) {
     const b = document.createElement('button');
-    b.className = 'linkbtn'; b.textContent = '打开位置';
-    b.onclick = () => B.revealFile(f.id, f.name);
+    b.className = 'wbtn'; b.textContent = '⤓ 打开位置';
+    b.onclick = (e) => { e.stopPropagation(); B.revealFile(f.id, f.name); };
     act.appendChild(b);
   } else {
     const a = document.createElement('a');
-    a.className = 'linkbtn'; a.textContent = '下载'; a.href = fileUrl(f.id);
+    a.className = 'wbtn'; a.textContent = '⤓ 下载'; a.href = fileUrl(f.id);
     a.setAttribute('download', f.name);
+    a.onclick = (e) => e.stopPropagation();
     act.appendChild(a);
   }
   const del = document.createElement('button');
-  del.className = 'linkbtn del'; del.textContent = '删除';
-  del.onclick = async () => { if (confirm('删除 ' + f.name + ' ?')) { await api('/api/file/' + f.id, { method: 'DELETE' }); loadFiles(); } };
+  del.className = 'wbtn del'; del.textContent = '🗑';
+  del.onclick = async (e) => {
+    e.stopPropagation();
+    if (confirm('删除 ' + f.name + ' ?')) { await api('/api/file/' + f.id, { method: 'DELETE' }); loadFiles(); }
+  };
   act.appendChild(del);
-  div.appendChild(act);
-  return div;
+  card.appendChild(act);
+  return card;
+}
+function iconBox(ch) {
+  const d = document.createElement('div');
+  d.className = 'wiconbox';
+  d.textContent = ch;
+  return d;
 }
 
-/* 保存到本机：优先原生流式下载（无大小限制），退回 base64 */
+/* 保存到本机：优先原生流式下载，退回 base64 */
 async function saveItem(f) {
   if (B && B.saveFromUrl) {
     const ok = await Promise.resolve(B.saveFromUrl(fileUrl(f.id), f.name, f.mime || 'application/octet-stream'));
@@ -318,14 +346,18 @@ dz.addEventListener('drop', e => { if (e.dataTransfer.files.length) uploadFiles(
 function uploadFiles(files) {
   Array.from(files).forEach(f => uploadOne(f));
 }
+function progressCard(file) {
+  const card = document.createElement('div');
+  card.className = 'wcard upcard';
+  card.innerHTML = '<div class="wiconbox">⬆️</div>' +
+    '<div class="winfo"><div class="wname">' + esc(file.name) + '</div>' +
+    '<div class="wmeta"><span class="pct">0%</span><span class="progress" style="flex:1"><i></i></span></div></div>';
+  const col = document.querySelector('#fileList .wf-col');
+  if (col) col.prepend(card); else $('#fileList').prepend(card);
+  return card;
+}
 function uploadOne(file) {
-  const div = document.createElement('div');
-  div.className = 'item';
-  div.innerHTML = '<div class="fileicon">⬆️</div>' +
-    '<div class="info"><div class="name">' + esc(file.name) + '</div>' +
-    '<div class="meta">' + fmtSize(file.size) + ' · 上传中 <b class="pct">0%</b></div>' +
-    '<div class="progress"><i></i></div></div>';
-  $('#fileList').prepend(div);
+  const card = progressCard(file);
   const fd = new FormData();
   fd.append('file', file, file.name);
   fd.append('from', myName());
@@ -335,12 +367,12 @@ function uploadOne(file) {
   xhr.upload.onprogress = (e) => {
     if (e.lengthComputable) {
       const p = Math.round(e.loaded / e.total * 100);
-      div.querySelector('.pct').textContent = p + '%';
-      div.querySelector('.progress i').style.width = p + '%';
+      card.querySelector('.pct').textContent = p + '%';
+      card.querySelector('.progress i').style.width = p + '%';
     }
   };
-  xhr.onload = () => { div.remove(); if (xhr.status === 200) { toast('已发送 ' + file.name); loadFiles(); } else toast('上传失败：' + (xhr.responseText || xhr.status)); };
-  xhr.onerror = () => { div.remove(); toast('上传失败，请检查连接'); };
+  xhr.onload = () => { card.remove(); if (xhr.status === 200) { toast('已发送 ' + file.name); loadFiles(); } else toast('上传失败：' + (xhr.responseText || xhr.status)); };
+  xhr.onerror = () => { card.remove(); toast('上传失败，请检查连接'); };
   xhr.send(fd);
 }
 
@@ -437,7 +469,10 @@ async function loadQR() {
     }
   } catch (e) {}
 }
-$('#btnChangeServer').onclick = () => showSetup('粘贴 PC 端显示的新地址：');
+$('#btnChangeServer').onclick = () => {
+  if (CAP.nativeSettings) B.openSettings();
+  else showSetup('粘贴 PC 端显示的新地址：');
+};
 $('#myName').textContent = myName();
 $('#myName').title = '点击改名';
 $('#myName').onclick = () => {
@@ -454,7 +489,21 @@ function initAutosave() {
   chk.onchange = () => { LS.autosave = chk.checked; toast(chk.checked ? '已开启自动保存' : '已关闭自动保存'); };
 }
 
-/* 页面重新可见时刷新 */
+/* 原生连接入口（安卓头部齿轮） */
+function initNativeSettingsBtn() {
+  if (!CAP.nativeSettings) return;
+  const b = $('#btnNativeSettings');
+  b.hidden = false;
+  b.onclick = () => B.openSettings();
+}
+
+/* 窗口尺寸变化 → 重排瀑布流列数 */
+let resizeTimer = null;
+window.addEventListener('resize', () => {
+  clearTimeout(resizeTimer);
+  resizeTimer = setTimeout(loadFiles, 250);
+});
+
 document.addEventListener('visibilitychange', () => {
   if (!document.hidden) { loadFiles(); loadTexts(); }
 });
@@ -477,6 +526,7 @@ document.addEventListener('visibilitychange', () => {
     setConn(false);
   }
   initAutosave();
+  initNativeSettingsBtn();
   connectWS();
   loadFiles(); loadTexts(); loadQR();
 })();
