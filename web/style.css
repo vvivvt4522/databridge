@@ -235,3 +235,8 @@ nav button .ic { display: block; font-size: 20px; margin-bottom: 2px; }
   font-size: 15px; padding: 4px 8px; background: var(--line);
   border-radius: 8px;
 }
+
+/* ===== v0.3.1 拖拽上传区仅限 PC（触屏设备隐藏） ===== */
+@media (hover: none), (pointer: coarse) {
+  #dropzone { display: none; }
+}
