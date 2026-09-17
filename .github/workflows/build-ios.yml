@@ -14,8 +14,12 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install xcodegen
-        run: brew install xcodegen
+      - name: Install xcodegen 2.43.0（固定旧版：新版本生成的工程格式 Xcode 15.4 读不了）
+        run: |
+          curl -sL https://github.com/yonaskolb/XcodeGen/releases/download/2.43.0/xcodegen.zip -o /tmp/xcodegen.zip
+          unzip -q -o /tmp/xcodegen.zip -d /tmp/xcodegen
+          echo "/tmp/xcodegen/bin" >> $GITHUB_PATH
+          /tmp/xcodegen/bin/xcodegen version
 
       - name: Generate Xcode project
         working-directory: ios-app
