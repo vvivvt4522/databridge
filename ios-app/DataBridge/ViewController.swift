@@ -171,13 +171,12 @@ class ViewController: UIViewController, WKScriptMessageHandler, WKNavigationDele
             }
         } else {
             let ac = UIActivityViewController(activityItems: [tmp], applicationActivities: nil)
+            // iPad 必须提供弹出锚点，否则崩溃
+            ac.popoverPresentationController?.sourceView = view
+            ac.popoverPresentationController?.sourceRect = CGRect(
+                x: view.bounds.midX, y: view.bounds.midY, width: 1, height: 1)
             present(ac, animated: true)
             done(true)
         }
-    }
-
-    func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
-        // 页面加载后隐藏设置面板残留
-        if panel.superview != nil && !panel.isHidden && urlField.text?.isEmpty == false { return }
     }
 }

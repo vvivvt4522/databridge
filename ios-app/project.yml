@@ -32,3 +32,12 @@ targets:
         CODE_SIGNING_REQUIRED: "NO"
         TARGETED_DEVICE_FAMILY: "1,2"
         SWIFT_VERSION: "5.9"
+schemes:
+  DataBridge:
+    build:
+      targets:
+        DataBridge: all
+    run:
+      config: Release
+    archive:
+      config: Release
