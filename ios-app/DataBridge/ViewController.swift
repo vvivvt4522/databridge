@@ -161,9 +161,9 @@ class ViewController: UIViewController, WKScriptMessageHandler, WKNavigationDele
                 guard status == .authorized || status == .limited else { DispatchQueue.main.async { done(false) }; return }
                 PHPhotoLibrary.shared().performChanges({
                     if isImage {
-                        PHAssetChangeRequest.creationRequestForAssetFromImage(at: tmp)
+                        PHAssetChangeRequest.creationRequestForAssetFromImage(atFileURL: tmp)
                     } else {
-                        PHAssetChangeRequest.creationRequestForAssetFromVideo(at: tmp)
+                        PHAssetChangeRequest.creationRequestForAssetFromVideo(atFileURL: tmp)
                     }
                 }, completionHandler: { ok, _ in
                     DispatchQueue.main.async { done(ok) }
