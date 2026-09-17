@@ -9,17 +9,21 @@ on:
 
 jobs:
   build:
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install xcodegen 2.43.0（固定旧版：新版本生成的工程格式 Xcode 15.4 读不了）
+      - name: Install xcodegen
+        run: brew install xcodegen
+
+      - name: Select newest Xcode
         run: |
-          curl -sL https://github.com/yonaskolb/XcodeGen/releases/download/2.43.0/xcodegen.zip -o /tmp/xcodegen.zip
-          unzip -q -o /tmp/xcodegen.zip -d /tmp/xcodegen
-          echo "/tmp/xcodegen/bin" >> $GITHUB_PATH
-          /tmp/xcodegen/bin/xcodegen version
+          ls -d /Applications/Xcode*.app
+          LATEST=$(ls -d /Applications/Xcode*.app | sort -V | tail -1)
+          echo "Selecting $LATEST"
+          sudo xcode-select -s "$LATEST"
+          xcodebuild -version
 
       - name: Generate Xcode project
         working-directory: ios-app
