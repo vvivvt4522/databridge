@@ -1,0 +1,20 @@
+'use strict';
+/* 将 256px PNG 打包为 ICO（Windows 支持 PNG 载荷的 256px 图标） */
+const fs = require('fs');
+const path = require('path');
+const src = path.join(__dirname, '..', 'assets', 'icon.png');
+const out = path.join(__dirname, '..', 'assets', 'icon.ico');
+const png = fs.readFileSync(src);
+const header = Buffer.alloc(6);
+header.writeUInt16LE(0, 0);
+header.writeUInt16LE(1, 2);
+header.writeUInt16LE(1, 4);
+const entry = Buffer.alloc(16);
+entry[0] = 0;
+entry[1] = 0;
+entry.writeUInt16LE(1, 4);
+entry.writeUInt16LE(32, 6);
+entry.writeUInt32LE(png.length, 8);
+entry.writeUInt32LE(22, 12);
+fs.writeFileSync(out, Buffer.concat([header, entry, png]));
+console.log('icon.ico OK (' + png.length + ' bytes png)');
