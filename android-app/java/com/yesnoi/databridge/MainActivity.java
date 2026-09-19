@@ -490,7 +490,7 @@ public class MainActivity extends Activity {
                             }
                             if (host == null || token.isEmpty()) return;
                             final String url = "http://" + host.getHostAddress() + ":" + port + "/?t=" + token;
-                            final String label = name.replace("DataBridge-", "PC：");
+                            final String label = name.replace("DataBridge-", "");
                             main.post(() -> {
                                 if (discoverySilent) {
                                     if (autoConnecting) { autoConnecting = false; loadApp(url); }
